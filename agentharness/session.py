@@ -75,6 +75,7 @@ class SessionStore:
             "work_dir": str(self.work_dir),
             "source_project": state.get("source_project") or previous.get("source_project")
                               or self.source_project,
+            "resume_count": int(previous.get("resume_count", 0)),
             **state,
         }
         _atomic_json(self.session_path, payload)
