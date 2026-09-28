@@ -1,0 +1,26 @@
+# Example repository-local harness configuration.
+# Copy to <project>/agentharness.toml and edit commands for that project.
+
+[context]
+max_chars = 12000
+
+[verification]
+continuous = ["syntax"]
+finish = ["syntax", "tests"]
+full_every_edits = 3
+
+[reviewer]
+every_edits = 2
+
+[checks]
+# lint = "ruff check ."
+# architecture = "python scripts/check_architecture.py"
+
+[dev.web]
+argv = ["pnpm", "dev"]
+cwd = "apps/web"
+
+# Additional named services can be added the same way:
+# [dev.api]
+# argv = ["python", "-m", "uvicorn", "app:app", "--reload"]
+# cwd = "services/api"
