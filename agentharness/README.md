@@ -128,7 +128,7 @@ own harness (`swegemma`) on a declarative submission; that lives in
 
 ## Tests
 
-The branch CI currently reports **45 passed, 5 skipped** for the full repository. Tests use
+The branch CI currently reports **46 passed, 5 skipped** for the full repository. Tests use
 scripted/fake model servers so controller behavior is deterministic. The recovery suite
 explicitly stops an agent after an edit, reopens the same workspace/session with a second
 client, continues the task, and verifies that the original repository stayed untouched.
