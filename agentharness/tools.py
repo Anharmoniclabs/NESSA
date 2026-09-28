@@ -111,6 +111,23 @@ def build_tools(allow_shell: bool = True, allow_extract: bool = True) -> dict[st
              "e.g. a test file path or -k expression.",
              {"name": S, "args": S}, ("name",), "check",
              handler=lambda c, a: c.run_check(a["name"], a.get("args", ""))),
+        Tool("instructions_for", "Show persistent AGENTS.md/agent.md instructions that apply to a path.",
+             {"path": S}, ("path",), "read",
+             handler=lambda c, a: c.project_instructions.context_for(a["path"]) or "(no project instructions)"),
+        Tool("list_skills", "List available micro-harness skills and what each is for.", {},
+             kind="read", handler=lambda c, a: c.skills.summary()),
+        Tool("use_skill", "Activate a focused micro-harness recipe in the current agent. This does not spawn another agent.",
+             {"name": S}, ("name",), "read", handler=lambda c, a: c.activate_skill(a["name"])),
+        Tool("dev_start", "Start a named local development process using an argv array (no shell). Logs go to run evidence.",
+             {"name": S, "argv": {"type": "array", "items": S}, "cwd": S}, ("name", "argv"), "dev",
+             handler=lambda c, a: c.dev.start(a["name"], a["argv"], a.get("cwd", "."))),
+        Tool("dev_status", "Show status of one or all managed local development processes.",
+             {"name": S}, kind="read", handler=lambda c, a: c.dev.status(a.get("name"))),
+        Tool("dev_logs", "Tail captured logs from a managed development process.",
+             {"name": S, "max_bytes": I}, ("name",), "read",
+             handler=lambda c, a: c.dev.logs(a["name"], a.get("max_bytes", 12000))),
+        Tool("dev_stop", "Stop a managed local development process.",
+             {"name": S}, ("name",), "dev", handler=lambda c, a: c.dev.stop(a["name"])),
     ]
     if allow_shell:
         tools.append(Tool(

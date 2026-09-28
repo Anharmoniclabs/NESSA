@@ -22,6 +22,8 @@ from .agent import Agent, AgentConfig
 from .checks import CheckRunner, detect_checks
 from .llm import ChatClient, ModelError
 from .memory import LessonStore
+from .reviewer import Reviewer
+from .skills import SkillRegistry
 from .workspace import Workspace
 
 DEFAULT_URL = os.environ.get("AGENT_BASE_URL", "http://127.0.0.1:11434/v1")  # Ollama
@@ -36,7 +38,10 @@ def _config(a, **over) -> AgentConfig:
     return AgentConfig(max_steps=a.max_steps, plan_first=not a.no_plan, allow_shell=not a.no_shell,
                        tool_mode="text" if a.text_tools else "native",
                        baseline_checks=not a.no_baseline,
-                       verify=tuple(v for v in a.verify.split(",") if v), **over)
+                       verify=tuple(v for v in a.verify.split(",") if v),
+                       continuous_verify=tuple(v for v in a.continuous_verify.split(",") if v),
+                       full_verify_every_edits=max(0, a.full_verify_every_edits),
+                       review_every_edits=max(1, a.review_every_edits), **over)
 
 
 def cli_approver(plan: dict) -> tuple[bool, str]:
@@ -69,9 +74,15 @@ def cmd_run(a) -> int:
         name, _, command = spec.partition("=")
         checks[name] = command
     lessons = LessonStore().relevant(str(project), task)
+    reviewer = None
+    if a.review_model:
+        review_url = a.review_base_url or a.base_url
+        review_client = ChatClient(review_url, a.review_model, max_tokens=min(a.max_tokens, 4096),
+                                   allow_remote=a.allow_remote)
+        reviewer = Reviewer(review_client)
     agent = Agent(_client(a), ws, config=_config(a, require_approval=not a.auto_approve),
                   checks=CheckRunner(checks), approver=None if a.auto_approve else cli_approver,
-                  lessons=lessons)
+                  lessons=lessons, reviewer=reviewer)
     print(f"Working copy: {ws.repo}\nChecks: {', '.join(checks)}")
     result = agent.run(task)
     print(f"\nStatus: {result.status}  ({result.steps} steps, {result.seconds}s)")
@@ -132,6 +143,12 @@ def cmd_extract(a) -> int:
     return 0
 
 
+def cmd_skills(a) -> int:
+    registry = SkillRegistry(Path(a.project).resolve())
+    print(registry.summary())
+    return 0
+
+
 def cmd_lesson(a) -> int:
     store = LessonStore()
     key = str(Path(a.project).resolve())
@@ -185,6 +202,16 @@ def main(argv=None) -> int:
         sp.add_argument("--no-baseline", action="store_true", help="skip running tests before changes")
         sp.add_argument("--text-tools", action="store_true", help="JSON-in-text tool calls (no native tools)")
         sp.add_argument("--verify", default="syntax,tests", help="checks run when the agent finishes")
+        sp.add_argument("--continuous-verify", default="syntax",
+                        help="cheap checks run automatically after every successful edit")
+        sp.add_argument("--full-verify-every-edits", type=int, default=3,
+                        help="run the tests check every N successful edits; 0 disables")
+        sp.add_argument("--review-model", default=os.environ.get("AGENT_REVIEW_MODEL", ""),
+                        help="optional second local model used only for advisory code review")
+        sp.add_argument("--review-base-url", default=os.environ.get("AGENT_REVIEW_BASE_URL", ""),
+                        help="reviewer model server; defaults to --base-url")
+        sp.add_argument("--review-every-edits", type=int, default=2,
+                        help="ask reviewer for notes every N successful edits")
 
     r = sub.add_parser("run", help="work on a project")
     r.add_argument("project")
@@ -225,6 +252,10 @@ def main(argv=None) -> int:
     e.add_argument("--out", help=".csv .tsv .json .jsonl .md")
     e.add_argument("--tables-out")
     e.set_defaults(fn=cmd_extract)
+
+    sk = sub.add_parser("skills", help="list built-in and repository micro-harness skills")
+    sk.add_argument("project")
+    sk.set_defaults(fn=cmd_skills)
 
     l = sub.add_parser("lesson", help="project notes for future runs")
     l.add_argument("action", choices=["add", "list"])
