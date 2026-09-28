@@ -68,16 +68,15 @@ class ProjectInstructions:
                 lineage.append(cur)
         found: list[InstructionFile] = []
         seen: set[str] = set()
+        for rel_extra in EXTRA_ROOT:
+            item = self._read(self.root / rel_extra)
+            if item:
+                found.append(item)
+                seen.add(item.path)
         for directory in lineage:
             names = ROOT_NAMES if directory == self.root else ("AGENTS.md", "agent.md", "AGENT.md")
             for name in names:
                 item = self._read(directory / name)
-                if item and item.path not in seen:
-                    found.append(item)
-                    seen.add(item.path)
-        if self.root == directory:
-            for rel_extra in EXTRA_ROOT:
-                item = self._read(self.root / rel_extra)
                 if item and item.path not in seen:
                     found.append(item)
                     seen.add(item.path)
