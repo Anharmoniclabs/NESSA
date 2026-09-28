@@ -79,6 +79,25 @@ class Workspace:
                         ignore=shutil.ignore_patterns(*SCAN_SKIP, "*.pyc"))
         return ws
 
+    @classmethod
+    def open(cls, work_dir: Path) -> "Workspace":
+        """Reopen an existing private workspace without recreating its snapshots."""
+        ws = cls(Path(work_dir).resolve())
+        if not ws.repo.is_dir() or not ws.baseline.is_dir():
+            raise FileNotFoundError(
+                f"Not an agent workspace: expected {ws.repo} and {ws.baseline}"
+            )
+        journal_path = ws.work_dir / "evidence" / "journal.json"
+        if journal_path.is_file():
+            try:
+                import json
+                rows = json.loads(journal_path.read_text(encoding="utf-8"))
+                if isinstance(rows, list):
+                    ws.journal = rows
+            except (OSError, ValueError):
+                pass
+        return ws
+
     # ------------------------------------------------------------ paths
 
     def path(self, rel: str | None) -> Path:
