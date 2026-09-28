@@ -1,9 +1,10 @@
 # Per-task budgets used during Kaggle scoring (Stage 1 inference).
-# Harness defaults are 60 min / 100 tool calls / 500 turns / 300 s per command.
-# These are tighter so ~120 hidden tasks fit the notebook runtime limit; raise them
-# only after checking total runtime on the public tasks.
+# Scoring runs the ~120 hidden tasks ONE AT A TIME inside a 12-hour cap (including
+# sandbox setup). Reported by other entrants: 5.5 min/task exceeded the cap and failed;
+# 3.5 min/task finished in ~7.5 h. 4.5 min/task ≈ 9.5–10 h leaves margin for model load.
+# Do not raise max_time_minutes above ~5 without measuring total runtime.
 evaluation:
-  timeout_seconds: 240
-  max_tool_calls: 60
-  max_time_minutes: 25
-  max_turns: 120
+  timeout_seconds: 90
+  max_tool_calls: 30
+  max_time_minutes: 4.5
+  max_turns: 60

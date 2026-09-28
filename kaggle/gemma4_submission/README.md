@@ -9,8 +9,8 @@ hidden tests in a fresh container. Score = fraction of tasks resolved.
 submission/
 ├── agent.yaml            flat root agent, all 9 harness tools, the single allowed model
 ├── prompts/system.md     the workflow: locate → reproduce in /tmp → minimal fix → targeted test → clean → submit_patch
-├── configs/sampling.yaml temperature 0.2, 8192 output tokens, 3072 thinking budget
-└── eval_config.yaml      per-task budget: 25 min, 60 tool calls, 120 turns, 240 s per command
+├── configs/sampling.yaml temperature 0.2, 4096 output tokens, 1024 thinking budget
+└── eval_config.yaml      per-task budget: 4.5 min, 30 tool calls, 60 turns, 90 s per command
 ```
 
 ## Notebook (4× L4, inputs attached)
@@ -55,8 +55,10 @@ prompts. ADK fills those from session state at runtime, and only
 - The model loops on reads without editing → tighten step 2 of the prompt.
 - It submits without testing → add a check requirement before `submit_patch`.
 - It times out → lower `max_time_minutes` / `max_tool_calls`, or shorten thinking.
-- Budgets vs runtime: check the competition's notebook runtime limit on the rules page
-  before raising `eval_config.yaml`. About 120 hidden tasks run in the scoring job.
+- **Budgets vs the 12-hour cap:** scoring runs about 120 hidden tasks one after another, and
+  the 12 hours include sandbox setup. Another entrant reported that 5.5 min/task failed
+  ("Notebook Exceeded Allowed Compute") and 3.5 min/task finished in about 7.5 h. Cell 3
+  prints a projected full-run time; keep it under about 10.5 h.
 
 Sources: the harness behaviour here follows `HARNESS_README.md` from the competition
 dataset (copy consulted: github.com/rishaviitd/kaggle.gemma.coding.agent,

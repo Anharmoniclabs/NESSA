@@ -1,9 +1,10 @@
-# Low temperature for repeatable edits. Thinking stays on (the harness serves with
-# enable_thinking) but is capped so a long thought cannot cut off a tool call.
-# max_output_tokens is kept at 8192 so prompt + output fits the 32,768-token window.
+# Tasks get ~4.5 minutes each, so tokens are time: keep thinking short and outputs
+# small. Low temperature for repeatable edits. Thinking stays on (the harness serves
+# with enable_thinking) but capped well below the output limit so a tool call is
+# never cut off.
 temperature: 0.2
 top_p: 0.95
-max_output_tokens: 8192
+max_output_tokens: 4096
 thinking_config:
   include_thoughts: true
-  thinking_budget: 3072
+  thinking_budget: 1024

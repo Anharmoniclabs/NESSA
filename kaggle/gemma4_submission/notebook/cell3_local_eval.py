@@ -101,6 +101,21 @@ if rows_file.is_file():
         r = json.loads(line)
         keys = ("instance_id", "resolved", "error", "tool_calls_used", "duration_seconds")
         print({k: r.get(k) for k in keys if k in r})
+# Project the full scoring run: ~120 hidden tasks run sequentially under a 12 h cap.
+durations = []
+if rows_file.is_file():
+    for line in rows_file.read_text().splitlines():
+        r = json.loads(line)
+        d = r.get("duration_seconds") or r.get("agent_elapsed_seconds") or r.get("elapsed_seconds")
+        if isinstance(d, (int, float)):
+            durations.append(d)
+if durations:
+    per_task = sum(durations) / len(durations)
+    hours = per_task * 120 / 3600
+    print(f"Average {per_task/60:.1f} min/task -> about {hours:.1f} h for 120 sequential tasks "
+          f"({'OK' if hours < 10.5 else 'TOO SLOW: lower eval_config budgets'}; cap is 12 h incl. setup)")
+else:
+    print("No per-task durations found; time the run above: elapsed / tasks x 120 must stay under ~10.5 h.")
 for name in ("summary.json",):
     if (RESULTS / name).is_file():
         print(name, (RESULTS / name).read_text()[:2000])
