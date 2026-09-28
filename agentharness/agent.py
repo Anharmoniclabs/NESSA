@@ -298,13 +298,13 @@ class Agent:
         progressed = edited or tool.kind in ("check", "dev")
         if progressed:
             self.generation += 1
+        self.no_progress = 0 if progressed else self.no_progress + 1
+        self.log("tool", name=call.name, args={k: clip(str(v), 500) for k, v in args.items()},
+                 tool_kind=tool.kind, output=clip(out, 2000))
         if edited:
             followup = self._after_edit()
             if followup:
                 out += "\n\n[continuous verification]\n" + followup
-        self.no_progress = 0 if progressed else self.no_progress + 1
-        self.log("tool", name=call.name, args={k: clip(str(v), 500) for k, v in args.items()},
-                 tool_kind=tool.kind, output=clip(out, 2000))
         return out
 
     # ------------------------------------------------------------ phases
