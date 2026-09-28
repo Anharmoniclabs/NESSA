@@ -1,6 +1,7 @@
 """Command line:  python -m agentharness <command> ...
 
   run PROJECT "task"      plan, approve, edit a private copy, verify, write a patch
+  resume RUN_DIR         continue the same durable working session
   batch --comp DIR        unattended run over DIR/tasks.jsonl (Kaggle layout)
   extract FILES...        OCR/text + regex fields/tables -> CSV/JSON/Markdown
   lesson add|list         project-scoped notes injected into future runs
@@ -20,9 +21,11 @@ from pathlib import Path
 from . import extract as ex
 from .agent import Agent, AgentConfig
 from .checks import CheckRunner, detect_checks
+from .config import ProjectConfig, load_project_config
 from .llm import ChatClient, ModelError
 from .memory import LessonStore
 from .reviewer import Reviewer
+from .session import SessionStore
 from .skills import SkillRegistry
 from .workspace import Workspace
 
@@ -34,14 +37,25 @@ def _client(a) -> ChatClient:
     return ChatClient(a.base_url, a.model, max_tokens=a.max_tokens, allow_remote=a.allow_remote)
 
 
-def _config(a, **over) -> AgentConfig:
+def _csv(value: str | None) -> tuple[str, ...]:
+    return tuple(v.strip() for v in (value or "").split(",") if v.strip())
+
+
+def _config(a, project_config: ProjectConfig | None = None, **over) -> AgentConfig:
+    pc = project_config or ProjectConfig()
+    verify = _csv(a.verify) or pc.finish_verify or ("syntax", "tests")
+    continuous = _csv(a.continuous_verify) or pc.continuous_verify or ("syntax",)
+    full_every = (a.full_verify_every_edits if a.full_verify_every_edits is not None
+                  else pc.full_verify_every_edits if pc.full_verify_every_edits is not None else 3)
+    review_every = (a.review_every_edits if a.review_every_edits is not None
+                    else pc.review_every_edits if pc.review_every_edits is not None else 2)
     return AgentConfig(max_steps=a.max_steps, plan_first=not a.no_plan, allow_shell=not a.no_shell,
                        tool_mode="text" if a.text_tools else "native",
                        baseline_checks=not a.no_baseline,
-                       verify=tuple(v for v in a.verify.split(",") if v),
-                       continuous_verify=tuple(v for v in a.continuous_verify.split(",") if v),
-                       full_verify_every_edits=max(0, a.full_verify_every_edits),
-                       review_every_edits=max(1, a.review_every_edits), **over)
+                       verify=verify,
+                       continuous_verify=continuous,
+                       full_verify_every_edits=max(0, full_every),
+                       review_every_edits=max(1, review_every), **over)
 
 
 def cli_approver(plan: dict) -> tuple[bool, str]:
@@ -61,30 +75,27 @@ def cli_approver(plan: dict) -> tuple[bool, str]:
     return False, ans
 
 
-def cmd_run(a) -> int:
-    project = Path(a.project).resolve()
-    task = Path(a.task_file).read_text() if a.task_file else a.task
-    if not task:
-        sys.exit("Give a task string or --task-file.")
-    work = Path(a.work or Path.home() / ".agentharness" / "runs" /
-                f"{project.name}-{time.strftime('%Y%m%d-%H%M%S')}")
-    ws = Workspace.create(project, work)
-    checks = detect_checks(ws.repo)
-    for spec in a.check:
-        name, _, command = spec.partition("=")
-        checks[name] = command
-    lessons = LessonStore().relevant(str(project), task)
-    reviewer = None
-    if a.review_model:
-        review_url = a.review_base_url or a.base_url
-        review_client = ChatClient(review_url, a.review_model, max_tokens=min(a.max_tokens, 4096),
-                                   allow_remote=a.allow_remote)
-        reviewer = Reviewer(review_client)
-    agent = Agent(_client(a), ws, config=_config(a, require_approval=not a.auto_approve),
-                  checks=CheckRunner(checks), approver=None if a.auto_approve else cli_approver,
-                  lessons=lessons, reviewer=reviewer)
-    print(f"Working copy: {ws.repo}\nChecks: {', '.join(checks)}")
-    result = agent.run(task)
+def _reviewer(a):
+    if not a.review_model:
+        return None
+    review_url = a.review_base_url or a.base_url
+    review_client = ChatClient(review_url, a.review_model, max_tokens=min(a.max_tokens, 4096),
+                               allow_remote=a.allow_remote)
+    return Reviewer(review_client)
+
+
+def _registered_checks(repo: Path, pc: ProjectConfig, cli_specs: list[str]) -> dict:
+    checks = detect_checks(repo)
+    checks.update(pc.checks)
+    for spec in cli_specs:
+        name, sep, command = spec.partition("=")
+        if not sep or not name.strip() or not command.strip():
+            raise ValueError(f"Bad --check {spec!r}; expected NAME=COMMAND")
+        checks[name.strip()] = command.strip()
+    return checks
+
+
+def _print_result(result, *, show_diff: bool = False) -> None:
     print(f"\nStatus: {result.status}  ({result.steps} steps, {result.seconds}s)")
     print("Summary:", result.summary)
     for phase, rows in result.checks.items():
@@ -92,26 +103,87 @@ def cmd_run(a) -> int:
             print(f"  {phase}: {brief}")
     print(f"Changed: {', '.join(result.changed_files) or 'nothing'}")
     print(f"Patch + evidence: {result.evidence_dir}")
-    if result.patch and a.show_diff:
+    if result.patch and show_diff:
         print("\n" + result.patch)
-    if a.apply and result.patch:
-        if result.status not in ("verified", "unverified"):
-            print(f"Not applying: status is {result.status}.")
-        elif input(f"Apply patch to {project}? [y/N] ").strip().lower() == "y":
-            patch_file = Path(result.evidence_dir) / "patch.diff"
-            r = subprocess.run(["git", "apply", "--check", str(patch_file)], cwd=project,
-                               capture_output=True, text=True)
-            if r.returncode:
-                print("Patch does not apply cleanly:", r.stderr)
-                return 1
-            subprocess.run(["git", "apply", str(patch_file)], cwd=project, check=True)
-            print("Applied. Review with `git diff` in your project.")
+
+
+def _maybe_apply(result, project: Path, enabled: bool) -> int:
+    if not enabled or not result.patch:
+        return 0
+    if result.status not in ("verified", "unverified"):
+        print(f"Not applying: status is {result.status}.")
+        return 0
+    if input(f"Apply patch to {project}? [y/N] ").strip().lower() != "y":
+        return 0
+    patch_file = Path(result.evidence_dir) / "patch.diff"
+    r = subprocess.run(["git", "apply", "--check", str(patch_file)], cwd=project,
+                       capture_output=True, text=True)
+    if r.returncode:
+        print("Patch does not apply cleanly:", r.stderr)
+        return 1
+    subprocess.run(["git", "apply", str(patch_file)], cwd=project, check=True)
+    print("Applied. Review with `git diff` in your project.")
+    return 0
+
+
+def cmd_run(a) -> int:
+    project = Path(a.project).resolve()
+    task = Path(a.task_file).read_text() if a.task_file else a.task
+    if not task:
+        sys.exit("Give a task string or --task-file.")
+    pc = load_project_config(project)
+    work = Path(a.work or Path.home() / ".agentharness" / "runs" /
+                f"{project.name}-{time.strftime('%Y%m%d-%H%M%S')}")
+    ws = Workspace.create(project, work)
+    checks = _registered_checks(ws.repo, pc, a.check)
+    lessons = LessonStore().relevant(str(project), task)
+    store = SessionStore(work, project)
+    agent = Agent(_client(a), ws, config=_config(a, pc, require_approval=not a.auto_approve),
+                  checks=CheckRunner(checks), approver=None if a.auto_approve else cli_approver,
+                  lessons=lessons, reviewer=_reviewer(a), project_config=pc,
+                  session=store, source_project=project)
+    print(f"Working copy: {ws.repo}\nSession: {work}\nChecks: {', '.join(checks)}")
+    if pc.path:
+        print(f"Config: {pc.path}")
+    result = agent.run(task)
+    _print_result(result, show_diff=a.show_diff)
+    apply_rc = _maybe_apply(result, project, a.apply)
+    if apply_rc:
+        return apply_rc
+    return 0 if result.status in ("verified", "unverified", "no_change") else 1
+
+
+def cmd_resume(a) -> int:
+    work = Path(a.work).resolve()
+    store = SessionStore(work)
+    state = store.load()
+    if state.get("status") in ("verified", "unverified", "no_change"):
+        print(f"Session already completed with status {state['status']}.")
+        return 0
+    ws = Workspace.open(work)
+    source_text = str(state.get("source_project") or "")
+    source = Path(source_text).resolve() if source_text else ws.repo
+    config_root = source if source.is_dir() else ws.repo
+    pc = load_project_config(config_root)
+    checks = _registered_checks(ws.repo, pc, a.check)
+    task = str(state.get("task") or "")
+    lessons = LessonStore().relevant(str(source), task) if task else []
+    agent = Agent(_client(a), ws, config=_config(a, pc, require_approval=not a.auto_approve),
+                  checks=CheckRunner(checks), approver=None if a.auto_approve else cli_approver,
+                  lessons=lessons, reviewer=_reviewer(a), project_config=pc,
+                  session=store, source_project=source, resume=True)
+    print(f"Resuming: {work}\nWorking copy: {ws.repo}\nChecks: {', '.join(checks)}")
+    result = agent.run()
+    _print_result(result, show_diff=a.show_diff)
+    apply_rc = _maybe_apply(result, source, a.apply) if source.is_dir() else 0
+    if apply_rc:
+        return apply_rc
     return 0 if result.status in ("verified", "unverified", "no_change") else 1
 
 
 def cmd_batch(a) -> int:
     from .batch import run_batch
-    cfg = _config(a, require_approval=False)
+    cfg = _config(a, None, require_approval=False)
     run_batch(_client(a), Path(a.comp), Path(a.out), Path(a.runs), workers=a.workers, config=cfg,
               limit=a.limit, id_key=a.id_key, patch_key=a.patch_key)
     return 0
@@ -201,17 +273,18 @@ def main(argv=None) -> int:
         sp.add_argument("--no-shell", action="store_true", help="disable run_command")
         sp.add_argument("--no-baseline", action="store_true", help="skip running tests before changes")
         sp.add_argument("--text-tools", action="store_true", help="JSON-in-text tool calls (no native tools)")
-        sp.add_argument("--verify", default="syntax,tests", help="checks run when the agent finishes")
-        sp.add_argument("--continuous-verify", default="syntax",
-                        help="cheap checks run automatically after every successful edit")
-        sp.add_argument("--full-verify-every-edits", type=int, default=3,
-                        help="run the tests check every N successful edits; 0 disables")
+        sp.add_argument("--verify", default=None,
+                        help="finish checks (comma-separated); defaults to project config or syntax,tests")
+        sp.add_argument("--continuous-verify", default=None,
+                        help="checks after every successful edit; defaults to project config or syntax")
+        sp.add_argument("--full-verify-every-edits", type=int, default=None,
+                        help="run tests every N successful edits; project config or 3 by default; 0 disables")
         sp.add_argument("--review-model", default=os.environ.get("AGENT_REVIEW_MODEL", ""),
                         help="optional second local model used only for advisory code review")
         sp.add_argument("--review-base-url", default=os.environ.get("AGENT_REVIEW_BASE_URL", ""),
                         help="reviewer model server; defaults to --base-url")
-        sp.add_argument("--review-every-edits", type=int, default=2,
-                        help="ask reviewer for notes every N successful edits")
+        sp.add_argument("--review-every-edits", type=int, default=None,
+                        help="ask reviewer every N successful edits; project config or 2 by default")
 
     r = sub.add_parser("run", help="work on a project")
     r.add_argument("project")
@@ -225,6 +298,15 @@ def main(argv=None) -> int:
     r.add_argument("--apply", action="store_true", help="offer to git-apply the patch to PROJECT")
     agent_args(r)
     r.set_defaults(fn=cmd_run)
+
+    rs = sub.add_parser("resume", help="continue an existing durable run")
+    rs.add_argument("work", help="existing run directory containing repo/, baseline/ and evidence/session.json")
+    rs.add_argument("--check", action="append", default=[], metavar="NAME=COMMAND")
+    rs.add_argument("--auto-approve", action="store_true")
+    rs.add_argument("--show-diff", action="store_true")
+    rs.add_argument("--apply", action="store_true", help="offer to apply a verified patch to the original project")
+    agent_args(rs)
+    rs.set_defaults(fn=cmd_resume)
 
     b = sub.add_parser("batch", help="unattended run over tasks.jsonl")
     b.add_argument("--comp", required=True, help="folder with tasks.jsonl and snapshots/")
