@@ -21,8 +21,11 @@ from pathlib import Path
 from typing import Callable
 
 from .checks import CheckResult, CheckRunner, detect_checks
+from .context import ProjectInstructions
+from .dev import DevProcessManager
 from .llm import ContextOverflow, ModelError, Reply, ToolCall
 from .policy import ActionPolicy, apply_policy
+from .skills import SkillRegistry
 from .tools import build_tools
 from .workspace import ToolError, Workspace
 
@@ -71,6 +74,10 @@ class AgentConfig:
     tool_mode: str = "native"      # "native" tool calls, or "text" JSON for servers without tools
     allow_shell: bool = True
     allow_extract: bool = True
+    continuous_verify: tuple = ("syntax",)  # cheap checks after every successful edit
+    full_verify_every_edits: int = 3        # run tests every N edits when available; 0 disables
+    checkpoint_every_edit: bool = True
+    review_every_edits: int = 2             # only used when a reviewer model is configured
 
 
 @dataclass
@@ -121,7 +128,9 @@ class Agent:
                  checks: CheckRunner | None = None,
                  approver: Callable[[dict], tuple[bool, str]] | None = None,
                  lessons: list[str] = (), policy: ActionPolicy | None = None,
-                 evidence_dir: Path | None = None):
+                 evidence_dir: Path | None = None, reviewer=None,
+                 skills: SkillRegistry | None = None,
+                 project_instructions: ProjectInstructions | None = None):
         self.client = client
         self.ws = ws
         self.config = config or AgentConfig()
@@ -131,9 +140,16 @@ class Agent:
             raise ValueError("require_approval=True needs an approver callback.")
         self.lessons = list(lessons)
         self.policy = policy
+        self.reviewer = reviewer
         self.evidence_dir = Path(evidence_dir or ws.work_dir / "evidence")
+        self.project_instructions = project_instructions or ProjectInstructions(ws.repo)
+        self.skills = skills or SkillRegistry(ws.repo)
+        self.dev = DevProcessManager(ws, self.evidence_dir)
         self.log = EventLog(self.evidence_dir / "events.jsonl")
         self.tools = build_tools(self.config.allow_shell, self.config.allow_extract)
+        self.active_skills: list[str] = []
+        self.edit_count = 0
+        self.task = ""
         self.messages: list[dict] = []
         self._result_idx: list[int] = []
         self._call_idx: list[int] = []
@@ -153,6 +169,51 @@ class Agent:
         r = self.checks.run(name, self.ws, extra)
         self.log("check", phase="agent", **{**r.to_dict(), "output": clip(r.output, 2000)})
         return r.brief() + "\n" + r.output
+
+    def activate_skill(self, name: str) -> str:
+        try:
+            skill = self.skills.get(name)
+        except KeyError as exc:
+            return f"ERROR: {exc}"
+        if name not in self.active_skills:
+            self.active_skills.append(name)
+        missing = [t for t in skill.tools if t not in self.tools]
+        self.log("skill", name=name, source=skill.source, missing_tools=missing)
+        note = f"\n\nUnavailable harness tools: {', '.join(missing)}" if missing else ""
+        return skill.render() + note
+
+    def _after_edit(self) -> str:
+        """Checkpoint and verify continuously after a successful repository mutation."""
+        self.edit_count += 1
+        reports: list[str] = []
+        patch = self.ws.patch()
+        if self.config.checkpoint_every_edit:
+            checkpoint_dir = self.evidence_dir / "checkpoints"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            path = checkpoint_dir / f"edit-{self.edit_count:04d}-step-{self.steps:04d}.diff"
+            path.write_text(patch)
+            self.log("checkpoint", edit=self.edit_count, step=self.steps, path=str(path),
+                     changed=self.ws.changed_files())
+
+        names = [n for n in self.config.continuous_verify if n in self.checks.checks]
+        if (self.config.full_verify_every_edits and
+                self.edit_count % self.config.full_verify_every_edits == 0 and
+                "tests" in self.checks.checks and "tests" not in names):
+            names.append("tests")
+        check_briefs = []
+        for name in names:
+            result = self.checks.run(name, self.ws)
+            self.log("check", phase="continuous", edit=self.edit_count,
+                     **{**result.to_dict(), "output": clip(result.output, 2000)})
+            check_briefs.append(result.brief())
+            reports.append(result.brief() + ("\n" + clip(result.output, 2500) if result.output else ""))
+
+        cadence = max(1, int(self.config.review_every_edits or 1))
+        if self.reviewer is not None and self.edit_count % cadence == 0:
+            review = self.reviewer.review(self.task, patch, "\n".join(check_briefs))
+            self.log("review", phase="continuous", edit=self.edit_count, notes=clip(review, 4000))
+            reports.append("[reviewer]\n" + review)
+        return "\n\n".join(reports)
 
     # ------------------------------------------------------------ model I/O
 
@@ -234,9 +295,14 @@ class Agent:
             out = f"ERROR: {type(exc).__name__}: {exc}"
         self.last_tool = call.name
         edited = tool.kind == "edit" and out.startswith("ok")
-        if edited or tool.kind == "check":
+        progressed = edited or tool.kind in ("check", "dev")
+        if progressed:
             self.generation += 1
-        self.no_progress = 0 if edited else self.no_progress + 1
+        if edited:
+            followup = self._after_edit()
+            if followup:
+                out += "\n\n[continuous verification]\n" + followup
+        self.no_progress = 0 if progressed else self.no_progress + 1
         self.log("tool", name=call.name, args={k: clip(str(v), 500) for k, v in args.items()},
                  tool_kind=tool.kind, output=clip(out, 2000))
         return out
@@ -245,7 +311,11 @@ class Agent:
 
     def _intro(self, task: str) -> str:
         parts = [f"Task:\n{task.strip()}", f"Project files:\n{self.ws.list_dir('.', 2)}",
-                 f"Registered checks for run_check: {', '.join(self.checks.names()) or 'none'}"]
+                 f"Registered checks for run_check: {', '.join(self.checks.names()) or 'none'}",
+                 "Available micro-harness skills:\n" + self.skills.summary()]
+        instructions = self.project_instructions.root_context()
+        if instructions:
+            parts.append("Persistent project instructions:\n" + instructions)
         if self.baseline:
             parts.append("Before any change: " + "; ".join(r.brief() for r in self.baseline.values()))
         if self.lessons:
@@ -377,6 +447,7 @@ class Agent:
                 nudged = False
 
     def run(self, task: str) -> RunResult:
+        self.task = task
         self.log("start", task=task, config=asdict(self.config), checks=self.checks.names(),
                  model=getattr(self.client, "model", None))
         plan, status, summary = None, "error", ""
@@ -400,6 +471,7 @@ class Agent:
             status, summary = "error", f"Model server error: {exc}"
         except Exception as exc:
             status, summary = "error", f"Harness error: {type(exc).__name__}: {exc}"
+        self.dev.stop_all()
         patch = self.ws.patch()
         result = RunResult(status, summary, patch, self.steps, self.ws.changed_files(), plan,
                            {"baseline": {k: v.brief() for k, v in self.baseline.items()},
