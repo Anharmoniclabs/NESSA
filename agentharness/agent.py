@@ -287,6 +287,18 @@ class Agent:
         note = f"\n\nUnavailable harness tools: {', '.join(missing)}" if missing else ""
         return skill.render() + note
 
+    def dev_profiles(self) -> str:
+        return self.project_config.dev_summary()
+
+    def start_dev_profile(self, name: str) -> str:
+        profile = self.project_config.dev.get(name)
+        if profile is None:
+            return f"ERROR: unknown dev profile {name!r}; available: {', '.join(sorted(self.project_config.dev)) or '(none)'}"
+        result = self.dev.start(profile.name, list(profile.argv), profile.cwd)
+        self.log("dev_profile", name=profile.name, argv=list(profile.argv), cwd=profile.cwd)
+        self._persist()
+        return result
+
     def _after_edit(self) -> str:
         """Checkpoint and verify continuously after a successful repository mutation."""
         self.edit_count += 1
