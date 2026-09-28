@@ -18,6 +18,9 @@ ollama pull qwen2.5-coder:3b
 python -m agentharness doctor
 python -m agentharness run ~/code/myproject "Fix the crash when the config file is empty"
 python -m agentharness run ~/code/myproject --task-file task.md --show-diff --apply
+
+# If a run stops, continue the same private workspace/context instead of starting over:
+python -m agentharness resume ~/.agentharness/runs/<run-name>
 ```
 
 Another server: `--base-url http://127.0.0.1:8000/v1 --model <name>` (vLLM, llama.cpp),
@@ -31,20 +34,42 @@ or set `AGENT_BASE_URL` / `AGENT_MODEL`. Non-local servers are refused unless yo
 | Snapshot | The project is copied to `~/.agentharness/runs/<name>-<time>/repo` (plus a `baseline/` copy for diffs and undo). |
 | Baseline | Tests run once before any change, so the model and the report know what already failed. |
 | Plan | Read-only tools only. The model calls `propose_plan`. You approve it, reject it, or type feedback to get a revised plan. |
-| Execute | Full tools. An edit is refused unless the model has read the file's current version. Duplicate reads get flagged. After 12 actions with no change the model is nudged, and after 24 the run stops as `stalled`. |
-| Finish gate | When the model calls `finish`, the controller re-runs `syntax` and `tests` itself. If they fail, the model is sent back (twice by default) with the failure output. |
-| Evidence | `evidence/`: `events.jsonl` (ordered log), `patch.diff`, `result.json`, `messages.json`, `journal.json` |
+| Execute | Full tools. An edit is refused unless the model has read the file's current version. Duplicate reads get flagged. Skills can load focused micro-harness instructions and managed dev processes. |
+| Continuous verification | Every successful edit can checkpoint its patch and run cheap checks immediately; full tests can run every N edits. |
+| Review | An optional second local model receives patch + check evidence but no tools or completion authority. |
+| Finish gate | When the model calls `finish`, the controller independently re-runs the configured finish checks. If they fail, the model is sent back to repair. |
+| Evidence | `evidence/`: append-only events, durable `session.json`, `context-digest.json`, messages, journal, per-edit checkpoints, dev logs, patch and result. |
 
 **Statuses:** `verified` (tests passed) · `unverified` (changed, but no test could confirm
 it) · `improved` (fewer failures than the baseline) · `failed_checks` · `no_change` ·
 `stalled` · `budget_exhausted` · `rejected` / `no_plan` · `error`. A setup problem, a
 timeout or missing tests is never reported as a pass.
 
-**Tools:** `list_dir`, `search`, `outline`, `read_file`, `replace_in_file`, `edit_lines`,
-`write_file`, `undo_file`, `show_diff`, `run_check`, `run_command` (disable with
-`--no-shell`), `extract_text`, `extract_table`, `propose_plan`, `finish`.
+**Core tools:** repository list/search/outline/read, exact edits/write/undo, diff, checks and
+bounded commands. The harness also exposes persistent instruction lookup, skill discovery/
+activation, and managed development processes (`dev_start`, configured dev profiles,
+`dev_status`, `dev_logs`, `dev_stop`).
 
-Custom checks: `--check "tests=pytest -q tests/unit" --check "lint=ruff check ."`.
+Custom checks can be passed with `--check "tests=pytest -q tests/unit"` or persisted in
+`agentharness.toml`. Example:
+
+```toml
+[checks]
+tests = "python -m pytest -q"
+lint = "ruff check ."
+
+[verification]
+continuous = ["syntax", "lint"]
+finish = ["syntax", "tests", "lint"]
+full_every_edits = 3
+
+[dev.web]
+argv = ["pnpm", "dev"]
+cwd = "apps/web"
+```
+
+List built-in plus repository skills with `python -m agentharness skills <project>`.
+Repository skills live under `.agent/skills/<name>/SKILL.md` with optional `skill.json`.
 
 ## Document extraction (OCR + regex → table)
 
@@ -103,6 +128,10 @@ own harness (`swegemma`) on a declarative submission; that lives in
 
 ## Tests
 
-`python -m pytest -q agentharness`: 36 tests using a scripted model and a fake local
-HTTP server. They exercise the control flow, not model quality. Whether a given model
-reliably fixes real code has to be measured on real tasks.
+The branch CI currently reports **46 passed, 5 skipped** for the full repository. Tests use
+scripted/fake model servers so controller behavior is deterministic. The recovery suite
+explicitly stops an agent after an edit, reopens the same workspace/session with a second
+client, continues the task, and verifies that the original repository stayed untouched.
+
+These tests establish harness behavior, not coding-model quality. Real-model quality still
+has to be measured with the local model on representative repositories.

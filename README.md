@@ -8,6 +8,7 @@ Local-first autonomous coding agent work.
 | [`kaggle/gemma4_submission/`](kaggle/gemma4_submission/README.md) | Google Gemma 4 Developer Agent competition: declarative `submission/` for the `swegemma` harness, a validator/packager, and Kaggle notebook cells (start server → write submission → local eval). |
 
 ```bash
-python -m pytest -q          # 42 tests; fake model servers, no GPU needed
+python -m pytest -q          # branch CI: 46 passed, 5 skipped; no GPU needed
 python -m agentharness doctor
+python -m agentharness skills .
 ```

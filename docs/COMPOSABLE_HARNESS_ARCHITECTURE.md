@@ -456,12 +456,14 @@ command on every run.
 
 ### Phase B - durable session/context engine
 
-- event-sourced session state
-- restart-safe checkpoint manifest
-- context digest
-- exact resume
-- progress leases/budgets
-- durable dev-process reconciliation
+- [x] atomic durable session manifest
+- [x] append-only event log preserved across resumes
+- [x] persisted model/tool messages and repository edit journal
+- [x] deterministic context digest
+- [x] reopen the same workspace and continue after a durable stop/restart
+- [x] additional step budget on resume
+- [ ] exactly-once recovery for a command/MCP action interrupted mid-execution
+- [ ] durable dev-process reconciliation after parent-process restart
 
 ### Phase C - MCP adapter bus
 
@@ -481,12 +483,13 @@ command on every run.
 
 ### Phase E - structural conformance
 
-- `agentharness.toml`
-- custom check registry
-- ESLint/pnpm adapter
-- ast-grep adapter
-- dependency graph adapter
-- architecture test examples
+- [x] `agentharness.toml` loader
+- [x] repository-defined custom check registry
+- [x] named local dev profiles
+- [ ] ESLint/pnpm adapter
+- [ ] ast-grep adapter
+- [ ] dependency graph adapter
+- [ ] architecture test examples
 
 ### Phase F - browser/computer-use loop
 

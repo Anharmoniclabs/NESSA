@@ -98,6 +98,39 @@ class HTTPEndToEnd(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertNotIn("tools", server.requests[0])
 
+    def test_cli_resume_continues_http_agent(self):
+        work = self.tmp / "resume-work"
+        first_server = FakeServer("native")
+        self.addCleanup(first_server.close)
+        out1 = io.StringIO()
+        with redirect_stdout(out1):
+            first_code = main([
+                "run", str(self.proj), "add() subtracts", "--auto-approve",
+                "--base-url", first_server.url, "--model", "fake-model",
+                "--work", str(work), "--max-steps", "1",
+            ])
+        self.assertEqual(first_code, 1)
+        self.assertIn("Status: budget_exhausted", out1.getvalue())
+        self.assertIn("a + b", (work / "repo" / "calc.py").read_text())
+
+        second_server = FakeServer("native")
+        self.addCleanup(second_server.close)
+        out2 = io.StringIO()
+        with redirect_stdout(out2):
+            second_code = main([
+                "resume", str(work), "--auto-approve",
+                "--base-url", second_server.url, "--model", "fake-model",
+                "--max-steps", "4",
+            ])
+        self.assertEqual(second_code, 0, out2.getvalue())
+        self.assertIn("Status: unverified", out2.getvalue())
+        events = [json.loads(line) for line in
+                  (work / "evidence" / "events.jsonl").read_text().splitlines()]
+        self.assertEqual(sum(e["event"] == "start" for e in events), 1)
+        self.assertEqual(sum(e["event"] == "resume" for e in events), 1)
+        self.assertIn("a - b", (self.proj / "calc.py").read_text(),
+                      "CLI resume must not modify the original project")
+
     def test_client_refuses_remote_and_reports_overflow(self):
         with self.assertRaises(ValueError):
             ChatClient("https://api.example.com/v1", "m")

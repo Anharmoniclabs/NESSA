@@ -21,10 +21,12 @@ from pathlib import Path
 from typing import Callable
 
 from .checks import CheckResult, CheckRunner, detect_checks
+from .config import ProjectConfig
 from .context import ProjectInstructions
 from .dev import DevProcessManager
 from .llm import ContextOverflow, ModelError, Reply, ToolCall
 from .policy import ActionPolicy, apply_policy
+from .session import SessionStore
 from .skills import SkillRegistry
 from .tools import build_tools
 from .workspace import ToolError, Workspace
@@ -99,11 +101,19 @@ class RunResult:
 class EventLog:
     """Ordered, append-only evidence of everything the run did."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, append: bool = False):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text("")
         self.seq = 0
+        if append and self.path.is_file():
+            try:
+                for line in self.path.read_text(encoding="utf-8").splitlines():
+                    row = json.loads(line)
+                    self.seq = max(self.seq, int(row.get("seq") or 0))
+            except (OSError, ValueError, TypeError):
+                self.seq = 0
+        else:
+            self.path.write_text("", encoding="utf-8")
 
     def __call__(self, event: str, /, **data):
         self.seq += 1
@@ -130,10 +140,15 @@ class Agent:
                  lessons: list[str] = (), policy: ActionPolicy | None = None,
                  evidence_dir: Path | None = None, reviewer=None,
                  skills: SkillRegistry | None = None,
-                 project_instructions: ProjectInstructions | None = None):
+                 project_instructions: ProjectInstructions | None = None,
+                 project_config: ProjectConfig | None = None,
+                 session: SessionStore | None = None,
+                 source_project: Path | None = None,
+                 resume: bool = False):
         self.client = client
         self.ws = ws
         self.config = config or AgentConfig()
+        self.project_config = project_config or ProjectConfig()
         self.checks = checks or CheckRunner(detect_checks(ws.repo), timeout=self.config.command_timeout * 2)
         self.approver = approver or (auto_approve if not self.config.require_approval else None)
         if self.approver is None:
@@ -142,32 +157,121 @@ class Agent:
         self.policy = policy
         self.reviewer = reviewer
         self.evidence_dir = Path(evidence_dir or ws.work_dir / "evidence")
-        self.project_instructions = project_instructions or ProjectInstructions(ws.repo)
+        context_limit = self.project_config.context_max_chars or 12000
+        self.project_instructions = project_instructions or ProjectInstructions(ws.repo, context_limit)
         self.skills = skills or SkillRegistry(ws.repo)
         self.dev = DevProcessManager(ws, self.evidence_dir)
-        self.log = EventLog(self.evidence_dir / "events.jsonl")
+        self.session = session or SessionStore(ws.work_dir, source_project)
+        self.resume_mode = bool(resume)
+        self.log = EventLog(self.evidence_dir / "events.jsonl", append=self.resume_mode)
         self.tools = build_tools(self.config.allow_shell, self.config.allow_extract)
         self.active_skills: list[str] = []
         self.edit_count = 0
         self.task = ""
+        self.plan: dict | None = None
+        self.phase = "created"
+        self.status = "running"
         self.messages: list[dict] = []
         self._result_idx: list[int] = []
         self._call_idx: list[int] = []
         self._seen_calls: dict[str, int] = {}
         self.generation = 0        # bumps on every edit or command: invalidates duplicate detection
         self.steps = 0
+        self.step_limit = self.config.max_steps
         self.no_progress = 0
         self.finish_attempts = 0
         self.baseline: dict[str, CheckResult] = {}
         self.final: dict[str, CheckResult] = {}
         self.last_tool = ""
         self.started = time.monotonic()
+        if self.resume_mode:
+            self._restore_session()
+            self.step_limit = self.steps + self.config.max_steps
+
+    # ------------------------------------------------------------ durable session
+
+    def _context_digest(self) -> dict:
+        return {
+            "task": self.task,
+            "phase": self.phase,
+            "status": self.status,
+            "plan": self.plan,
+            "steps": self.steps,
+            "step_limit": self.step_limit,
+            "edit_count": self.edit_count,
+            "active_skills": list(self.active_skills),
+            "changed_files": self.ws.changed_files(),
+            "last_tool": self.last_tool,
+            "no_progress": self.no_progress,
+            "recent_edits": self.ws.journal[-8:],
+            "baseline": {k: v.brief() for k, v in self.baseline.items()},
+            "final": {k: v.brief() for k, v in self.final.items()},
+        }
+
+    def _persist(self) -> None:
+        state = {
+            "task": self.task,
+            "phase": self.phase,
+            "status": self.status,
+            "model": getattr(self.client, "model", None),
+            "config": asdict(self.config),
+            "plan": self.plan,
+            "steps": self.steps,
+            "edit_count": self.edit_count,
+            "generation": self.generation,
+            "no_progress": self.no_progress,
+            "finish_attempts": self.finish_attempts,
+            "active_skills": list(self.active_skills),
+            "last_tool": self.last_tool,
+            "baseline": {k: v.to_dict() for k, v in self.baseline.items()},
+            "final": {k: v.to_dict() for k, v in self.final.items()},
+        }
+        self.session.save(
+            state,
+            messages=self.messages,
+            digest=self._context_digest(),
+            journal=self.ws.journal,
+        )
+
+    def _restore_session(self) -> None:
+        state = self.session.load()
+        self.task = str(state.get("task") or "")
+        self.phase = str(state.get("phase") or "execute")
+        self.status = "running"
+        self.plan = state.get("plan") if isinstance(state.get("plan"), dict) else None
+        self.steps = int(state.get("steps") or 0)
+        self.edit_count = int(state.get("edit_count") or 0)
+        self.generation = int(state.get("generation") or 0)
+        self.no_progress = int(state.get("no_progress") or 0)
+        self.finish_attempts = int(state.get("finish_attempts") or 0)
+        self.active_skills = [str(x) for x in state.get("active_skills") or []]
+        self.last_tool = str(state.get("last_tool") or "")
+        self.messages = self.session.messages()
+        self.ws.journal = self.session.journal()
+        for key, row in (state.get("baseline") or {}).items():
+            if isinstance(row, dict):
+                self.baseline[str(key)] = CheckResult(**row)
+        for key, row in (state.get("final") or {}).items():
+            if isinstance(row, dict):
+                self.final[str(key)] = CheckResult(**row)
+        self._result_idx = [
+            i for i, message in enumerate(self.messages)
+            if message.get("role") == "tool"
+            or (message.get("role") == "user"
+                and str(message.get("content") or "").startswith("[tool results]"))
+        ]
+        self._call_idx = [
+            i for i, message in enumerate(self.messages)
+            if message.get("role") == "assistant" and message.get("tool_calls")
+        ]
+        self.session.mark_resume()
 
     # ------------------------------------------------------------ tool context
 
     def run_check(self, name: str, extra: str = "") -> str:
         r = self.checks.run(name, self.ws, extra)
         self.log("check", phase="agent", **{**r.to_dict(), "output": clip(r.output, 2000)})
+        self._persist()
         return r.brief() + "\n" + r.output
 
     def activate_skill(self, name: str) -> str:
@@ -179,8 +283,21 @@ class Agent:
             self.active_skills.append(name)
         missing = [t for t in skill.tools if t not in self.tools]
         self.log("skill", name=name, source=skill.source, missing_tools=missing)
+        self._persist()
         note = f"\n\nUnavailable harness tools: {', '.join(missing)}" if missing else ""
         return skill.render() + note
+
+    def dev_profiles(self) -> str:
+        return self.project_config.dev_summary()
+
+    def start_dev_profile(self, name: str) -> str:
+        profile = self.project_config.dev.get(name)
+        if profile is None:
+            return f"ERROR: unknown dev profile {name!r}; available: {', '.join(sorted(self.project_config.dev)) or '(none)'}"
+        result = self.dev.start(profile.name, list(profile.argv), profile.cwd)
+        self.log("dev_profile", name=profile.name, argv=list(profile.argv), cwd=profile.cwd)
+        self._persist()
+        return result
 
     def _after_edit(self) -> str:
         """Checkpoint and verify continuously after a successful repository mutation."""
@@ -213,6 +330,7 @@ class Agent:
             review = self.reviewer.review(self.task, patch, "\n".join(check_briefs))
             self.log("review", phase="continuous", edit=self.edit_count, notes=clip(review, 4000))
             reports.append("[reviewer]\n" + review)
+        self._persist()
         return "\n\n".join(reports)
 
     # ------------------------------------------------------------ model I/O
@@ -241,6 +359,7 @@ class Agent:
         self.log("model", content=clip(reply.content or "", 2000), reasoning=clip(reply.reasoning or "", 2000),
                  calls=[{"name": c.name, "args": c.arguments} for c in reply.tool_calls],
                  native=reply.native, prompt_tokens=reply.prompt_tokens)
+        self._persist()
         return reply
 
     def _deliver(self, reply: Reply, results: list[tuple[ToolCall, str]]):
@@ -254,10 +373,12 @@ class Agent:
             body = "\n\n".join(f"### {c.name} result\n{clip(t, limit)}" for c, t in results)
             self.messages.append({"role": "user", "content": "[tool results]\n" + body})
             self._result_idx.append(len(self.messages) - 1)
+        self._persist()
 
     def _say(self, text: str):
         self.messages.append({"role": "user", "content": text})
         self.log("controller", message=text)
+        self._persist()
 
     def _compact(self, keep_last: int = 6):
         for i in self._result_idx[:-keep_last]:
@@ -268,6 +389,14 @@ class Agent:
                 fn = c.get("function") or {}
                 if len(str(fn.get("arguments", ""))) > 1500:
                     fn["arguments"] = json.dumps({"elided": "large arguments removed"})
+        digest = self._context_digest()
+        self.messages.append({
+            "role": "user",
+            "content": "[controller-generated durable state digest]\n"
+                       + json.dumps(digest, indent=1, default=str)[:6000],
+        })
+        self.log("compact", keep_last=keep_last, digest=digest)
+        self._persist()
 
     # ------------------------------------------------------------ tool dispatch
 
@@ -343,6 +472,7 @@ class Agent:
             self._deliver(reply, results)
             if plan:
                 self.log("plan", plan=plan)
+                self._persist()
                 return plan
             if not reply.tool_calls:
                 idle += 1
@@ -362,9 +492,12 @@ class Agent:
             ok, feedback = self.approver(plan)
             self.log("approval", approved=ok, feedback=feedback)
             if ok:
+                self.plan = plan
+                self.phase = "execute"
                 note = f" Reviewer note: {feedback}" if feedback else ""
                 self._say("Plan approved. Carry it out now: make the edits, run the checks, "
                           "then call finish." + note)
+                self._persist()
                 return None, plan
             if not feedback or attempt == self.config.replan_limit:
                 return "rejected", plan
@@ -373,6 +506,8 @@ class Agent:
 
     def _finish_gate(self) -> tuple[str | None, str]:
         """Decide whether a `finish` request is accepted. Returns (final status or None, message)."""
+        self.phase = "verify"
+        self._persist()
         if not self.ws.changed_files():
             return "no_change", "Finished with no changes."
         self.final = {n: self.checks.run(n, self.ws) for n in self.config.verify if n in self.checks.checks}
@@ -381,11 +516,15 @@ class Agent:
         failing = [r for r in self.final.values() if r.status in ("failed", "timeout")]
         if not failing:
             real = any(r.status == "passed" and r.name != "syntax" for r in self.final.values())
+            self.phase = "finalize"
+            self._persist()
             return ("verified" if real else "unverified"), "Accepted."
         report = "\n\n".join(f"{r.brief()}\n{clip(r.output, 3000)}" for r in failing)
         base = "; ".join(f"{r.brief()}" for r in self.baseline.values())
         if self.finish_attempts < self.config.finish_retries:
             self.finish_attempts += 1
+            self.phase = "execute"
+            self._persist()
             return None, (f"Not accepted: verification failed.\n{report}\n"
                           + (f"\nBefore your change: {base}\n" if base else "")
                           + "\nFix the cause (or undo_file a change that broke it), then call finish again.")
@@ -403,7 +542,7 @@ class Agent:
         permitted = [n for n in self.tools if n != "propose_plan"]
         idle, nudged = 0, False
         while True:
-            if self.steps >= self.config.max_steps:
+            if self.steps >= self.step_limit:
                 return "budget_exhausted", f"Stopped after {self.steps} steps."
             if time.monotonic() - self.started > self.config.time_budget:
                 return "budget_exhausted", "Time budget used up."
@@ -446,23 +585,51 @@ class Agent:
             elif self.no_progress == 0:
                 nudged = False
 
-    def run(self, task: str) -> RunResult:
-        self.task = task
-        self.log("start", task=task, config=asdict(self.config), checks=self.checks.names(),
-                 model=getattr(self.client, "model", None))
-        plan, status, summary = None, "error", ""
+    def run(self, task: str | None = None) -> RunResult:
+        if self.resume_mode:
+            if task and self.task and task != self.task:
+                raise ValueError("A resumed session keeps its original task.")
+            self.task = self.task or (task or "")
+            if not self.task:
+                raise ValueError("Resumable session has no task.")
+            self.status = "running"
+            self.log("resume", task=self.task, steps=self.steps, edits=self.edit_count,
+                     changed=self.ws.changed_files())
+            if not self.messages:
+                self.messages = [{"role": "system", "content": self._system()},
+                                 {"role": "user", "content": self._intro(self.task)}]
+            self._say("Resume the existing session. The current working copy and durable state are "
+                      "authoritative. Re-read a file before editing it, continue from the unfinished "
+                      "work, verify, and call finish when complete.")
+        else:
+            if not task:
+                raise ValueError("A new run needs a task.")
+            self.task = task
+            self.phase = "baseline"
+            self.status = "running"
+            self.log("start", task=task, config=asdict(self.config), checks=self.checks.names(),
+                     model=getattr(self.client, "model", None))
+        status, summary = "error", ""
         try:
-            if self.config.baseline_checks and "tests" in self.checks.checks:
-                self.baseline["tests"] = self.checks.run("tests", self.ws)
-                self.log("check", phase="baseline",
-                         **{**self.baseline["tests"].to_dict(), "output": clip(self.baseline["tests"].output, 2000)})
-            self.messages = [{"role": "system", "content": self._system()},
-                             {"role": "user", "content": self._intro(task)}]
+            if not self.resume_mode:
+                if self.config.baseline_checks and "tests" in self.checks.checks:
+                    self.baseline["tests"] = self.checks.run("tests", self.ws)
+                    self.log("check", phase="baseline",
+                             **{**self.baseline["tests"].to_dict(), "output": clip(self.baseline["tests"].output, 2000)})
+                self.messages = [{"role": "system", "content": self._system()},
+                                 {"role": "user", "content": self._intro(self.task)}]
+                self._persist()
             stop = None
-            if self.config.plan_first:
-                stop, plan = self._approve()
-            else:
+            if self.config.plan_first and self.plan is None:
+                self.phase = "plan"
+                self._persist()
+                stop, self.plan = self._approve()
+            elif not self.resume_mode and not self.config.plan_first:
+                self.phase = "execute"
                 self._say("Start now: inspect, edit, verify, then call finish.")
+            else:
+                self.phase = "execute"
+                self._persist()
             if stop:
                 status, summary = stop, "No approved plan; nothing was changed."
             else:
@@ -472,14 +639,16 @@ class Agent:
         except Exception as exc:
             status, summary = "error", f"Harness error: {type(exc).__name__}: {exc}"
         self.dev.stop_all()
+        self.status = status
+        self.phase = "completed" if status in ("verified", "unverified", "no_change") else "stopped"
         patch = self.ws.patch()
-        result = RunResult(status, summary, patch, self.steps, self.ws.changed_files(), plan,
+        result = RunResult(status, summary, patch, self.steps, self.ws.changed_files(), self.plan,
                            {"baseline": {k: v.brief() for k, v in self.baseline.items()},
                             "final": {k: v.brief() for k, v in self.final.items()}},
                            str(self.evidence_dir), round(time.monotonic() - self.started, 1))
         (self.evidence_dir / "patch.diff").write_text(patch)
         (self.evidence_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
-        (self.evidence_dir / "messages.json").write_text(json.dumps(self.messages, indent=1, default=str))
-        (self.evidence_dir / "journal.json").write_text(json.dumps(self.ws.journal, indent=1))
+        self._persist()
         self.log("end", status=status, steps=self.steps, changed=result.changed_files)
+        self._persist()
         return result
