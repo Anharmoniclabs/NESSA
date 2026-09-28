@@ -1,0 +1,18 @@
+# Root agent for the Google Gemma 4 Developer Agent competition.
+# Flat single agent: direct tool calls on the root agent are the most reliable
+# setup for Gemma 4 (no sub-agent routing to go wrong).
+name: swe_fixer
+model: gemma-4-31b-it-qat-w4a16-ct
+description: Fixes Python bugs and implements small features in an unfamiliar repository.
+instruction: !include prompts/system.md
+tools:
+  - run_command
+  - read_file
+  - edit_file
+  - write_file
+  - get_status
+  - submit_patch
+  - get_code_neighbors
+  - search_similar_code
+  - get_code_subgraph
+generate_content_config: !include configs/sampling.yaml
