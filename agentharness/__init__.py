@@ -12,4 +12,4 @@ from .workspace import Workspace
 
 __all__ = ["Agent", "AgentConfig", "RunResult", "CheckResult", "CheckRunner", "detect_checks",
            "ChatClient", "Workspace"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"
