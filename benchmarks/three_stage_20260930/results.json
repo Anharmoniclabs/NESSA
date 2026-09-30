@@ -1,0 +1,899 @@
+{
+  "date": "2026-09-30",
+  "scope": "One deterministic run per code/task pair; smoke plus four small single-file heldout repairs; not a broad coding benchmark.",
+  "published_code_commit": "8442ab38387f9a5ed1206804c234772ba699ba9b",
+  "tested_local_code_commit": "62d2404d8df4bdac499723cfb5279c78ffda6a1d",
+  "tested_and_published_tree": "d523c92c9dbe951d2679d9340a0162ada4997354",
+  "baseline_commit": "e5b2d97993e6f26b6cd62747e57f0fbb31b000c3",
+  "runtime": {
+    "ollama": "0.35.0",
+    "model": "qwen2.5-coder:1.5b",
+    "details": {
+      "parent_model": "qwen2.5-coder:1.5b",
+      "format": "gguf",
+      "family": "qwen2",
+      "families": [
+        "qwen2"
+      ],
+      "parameter_size": "1.5B",
+      "quantization_level": "Q4_K_M"
+    },
+    "parameters": "temperature                    0\nnum_ctx                        8192\nnum_predict                    1024\nnum_thread                     2\nseed                           42",
+    "model_blob_sha256": "29d8c98fa6b098e200069bfb88b9508dc3e85586d20cba59f8dda9a808165104",
+    "mode": "text tools",
+    "intake_solve_max_tokens": 1024,
+    "respond_max_tokens": 256
+  },
+  "aggregate": {
+    "baseline": {
+      "cases": 5,
+      "verified": 0,
+      "statuses": {
+        "01-baseline-smoke": "no_plan",
+        "07-baseline-config_fallback": "no_plan",
+        "08-baseline-inclusive_range": "no_plan",
+        "09-baseline-label_normalization": "budget_exhausted",
+        "10-baseline-median_even": "budget_exhausted"
+      },
+      "total_seconds": 213.33100000000002,
+      "median_seconds": 41.204,
+      "http_calls": 56,
+      "prompt_tokens": 45059,
+      "completion_tokens": 1580,
+      "all_originals_unchanged": true,
+      "all_tests_unchanged": true
+    },
+    "candidate": {
+      "cases": 5,
+      "verified": 4,
+      "statuses": {
+        "02-candidate-smoke": "verified",
+        "03-candidate-config_fallback": "blocked",
+        "04-candidate-inclusive_range": "verified",
+        "05-candidate-label_normalization": "verified",
+        "06-candidate-median_even": "verified"
+      },
+      "total_seconds": 149.132,
+      "median_seconds": 28.272,
+      "http_calls": 15,
+      "prompt_tokens": 7128,
+      "completion_tokens": 1230,
+      "all_originals_unchanged": true,
+      "all_tests_unchanged": true
+    },
+    "scope": "One deterministic run per code/task pair; smoke plus four small single-file heldout repairs; not a broad coding benchmark."
+  },
+  "runs": [
+    {
+      "job": "01-baseline-smoke",
+      "code_commit": "e5b2d97993e6f26b6cd62747e57f0fbb31b000c3",
+      "status": "no_plan",
+      "seconds": 41.204,
+      "steps": 0,
+      "changed_files": [],
+      "checks": {
+        "baseline": {
+          "syntax": "[syntax] no_tests (exit=0, 0.0s) files=0 failed=0",
+          "tests": "[tests] failed (exit=1, 0.1s) failed=3 errors=0 passed=0"
+        },
+        "final": {
+          "syntax": "[syntax] no_tests (exit=0, 0.0s) files=0 failed=0",
+          "tests": "[tests] failed (exit=1, 0.1s) failed=3 errors=0 passed=0"
+        }
+      },
+      "original_unchanged": true,
+      "tests_unchanged": true,
+      "test_integrity": {
+        "checks/__init__.py": true,
+        "checks/addition_smoke.py": true
+      },
+      "http_calls": 8,
+      "http_seconds": 40.95470668799862,
+      "prompt_tokens": 5684,
+      "completion_tokens": 262,
+      "stages": [
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "tool_name"
+          ]
+        },
+        {
+          "stage": "respond",
+          "actions": []
+        }
+      ],
+      "patch_replay": null,
+      "patch_replay_tests": null,
+      "independent_grade": {
+        "status": "failed",
+        "cases_before_failure": 0,
+        "error": "AssertionError()"
+      }
+    },
+    {
+      "job": "02-candidate-smoke",
+      "code_commit": "62d2404d8df4bdac499723cfb5279c78ffda6a1d",
+      "status": "verified",
+      "seconds": 33.005,
+      "steps": 1,
+      "changed_files": [
+        "calc.py"
+      ],
+      "checks": {
+        "baseline": {
+          "syntax": "[syntax] no_tests (exit=0, 0.0s) files=0 failed=0",
+          "tests": "[tests] failed (exit=1, 0.1s) failed=3 errors=0 passed=0"
+        },
+        "final": {
+          "syntax": "[syntax] passed (exit=0, 0.0s) files=1 failed=0",
+          "tests": "[tests] passed (exit=0, 0.1s) failed=0 errors=0 passed=3"
+        }
+      },
+      "original_unchanged": true,
+      "tests_unchanged": true,
+      "test_integrity": {
+        "checks/__init__.py": true,
+        "checks/addition_smoke.py": true
+      },
+      "http_calls": 3,
+      "http_seconds": 32.75986838500103,
+      "prompt_tokens": 1373,
+      "completion_tokens": 215,
+      "stages": [
+        {
+          "stage": "intake",
+          "actions": [
+            "propose_plan"
+          ]
+        },
+        {
+          "stage": "solve",
+          "actions": [
+            "propose_edit"
+          ]
+        },
+        {
+          "stage": "respond",
+          "actions": []
+        }
+      ],
+      "patch_replay": {
+        "check": 0,
+        "apply": 0
+      },
+      "patch_replay_tests": {
+        "returncode": 0,
+        "output": "----------------------------------------------------------------------\nRan 3 tests in 0.000s\n\nOK\n"
+      },
+      "independent_grade": {
+        "status": "passed",
+        "cases": 100
+      }
+    },
+    {
+      "job": "03-candidate-config_fallback",
+      "code_commit": "62d2404d8df4bdac499723cfb5279c78ffda6a1d",
+      "status": "blocked",
+      "seconds": 28.272,
+      "steps": 1,
+      "changed_files": [],
+      "checks": {
+        "baseline": {
+          "syntax": "[syntax] no_tests (exit=0, 0.0s) files=0 failed=0",
+          "tests": "[tests] failed (exit=1, 0.1s) failed=4 errors=0 passed=0"
+        },
+        "final": {
+          "syntax": "[syntax] no_tests (exit=0, 0.0s) files=0 failed=0",
+          "tests": "[tests] failed (exit=1, 0.1s) failed=4 errors=0 passed=0"
+        }
+      },
+      "original_unchanged": true,
+      "tests_unchanged": true,
+      "test_integrity": {
+        "checks/__init__.py": true,
+        "checks/test_behavior.py": true
+      },
+      "http_calls": 3,
+      "http_seconds": 28.03104404900023,
+      "prompt_tokens": 1437,
+      "completion_tokens": 243,
+      "stages": [
+        {
+          "stage": "intake",
+          "actions": [
+            "propose_plan"
+          ]
+        },
+        {
+          "stage": "solve",
+          "actions": [
+            "report_blocker"
+          ]
+        },
+        {
+          "stage": "respond",
+          "actions": []
+        }
+      ],
+      "patch_replay": null,
+      "patch_replay_tests": null,
+      "independent_grade": {
+        "status": "failed",
+        "cases_before_failure": 1,
+        "error": "AssertionError()"
+      }
+    },
+    {
+      "job": "04-candidate-inclusive_range",
+      "code_commit": "62d2404d8df4bdac499723cfb5279c78ffda6a1d",
+      "status": "verified",
+      "seconds": 27.936,
+      "steps": 1,
+      "changed_files": [
+        "intervals.py"
+      ],
+      "checks": {
+        "baseline": {
+          "syntax": "[syntax] no_tests (exit=0, 0.0s) files=0 failed=0",
+          "tests": "[tests] failed (exit=1, 0.1s) failed=3 errors=0 passed=1"
+        },
+        "final": {
+          "syntax": "[syntax] passed (exit=0, 0.0s) files=1 failed=0",
+          "tests": "[tests] passed (exit=0, 0.1s) failed=0 errors=0 passed=4"
+        }
+      },
+      "original_unchanged": true,
+      "tests_unchanged": true,
+      "test_integrity": {
+        "checks/__init__.py": true,
+        "checks/test_behavior.py": true
+      },
+      "http_calls": 3,
+      "http_seconds": 27.692735206999714,
+      "prompt_tokens": 1404,
+      "completion_tokens": 249,
+      "stages": [
+        {
+          "stage": "intake",
+          "actions": [
+            "propose_plan"
+          ]
+        },
+        {
+          "stage": "solve",
+          "actions": [
+            "propose_edit"
+          ]
+        },
+        {
+          "stage": "respond",
+          "actions": []
+        }
+      ],
+      "patch_replay": {
+        "check": 0,
+        "apply": 0
+      },
+      "patch_replay_tests": {
+        "returncode": 0,
+        "output": "----------------------------------------------------------------------\nRan 4 tests in 0.000s\n\nOK\n"
+      },
+      "independent_grade": {
+        "status": "passed",
+        "cases": 100
+      }
+    },
+    {
+      "job": "05-candidate-label_normalization",
+      "code_commit": "62d2404d8df4bdac499723cfb5279c78ffda6a1d",
+      "status": "verified",
+      "seconds": 31.766,
+      "steps": 1,
+      "changed_files": [
+        "labels.py"
+      ],
+      "checks": {
+        "baseline": {
+          "syntax": "[syntax] no_tests (exit=0, 0.0s) files=0 failed=0",
+          "tests": "[tests] failed (exit=1, 0.1s) failed=3 errors=0 passed=1"
+        },
+        "final": {
+          "syntax": "[syntax] passed (exit=0, 0.0s) files=1 failed=0",
+          "tests": "[tests] passed (exit=0, 0.1s) failed=0 errors=0 passed=4"
+        }
+      },
+      "original_unchanged": true,
+      "tests_unchanged": true,
+      "test_integrity": {
+        "checks/__init__.py": true,
+        "checks/test_behavior.py": true
+      },
+      "http_calls": 3,
+      "http_seconds": 31.520773489999556,
+      "prompt_tokens": 1463,
+      "completion_tokens": 297,
+      "stages": [
+        {
+          "stage": "intake",
+          "actions": [
+            "propose_plan"
+          ]
+        },
+        {
+          "stage": "solve",
+          "actions": [
+            "propose_edit"
+          ]
+        },
+        {
+          "stage": "respond",
+          "actions": []
+        }
+      ],
+      "patch_replay": {
+        "check": 0,
+        "apply": 0
+      },
+      "patch_replay_tests": {
+        "returncode": 0,
+        "output": "----------------------------------------------------------------------\nRan 4 tests in 0.000s\n\nOK\n"
+      },
+      "independent_grade": {
+        "status": "passed",
+        "cases": 100
+      }
+    },
+    {
+      "job": "06-candidate-median_even",
+      "code_commit": "62d2404d8df4bdac499723cfb5279c78ffda6a1d",
+      "status": "verified",
+      "seconds": 28.153,
+      "steps": 1,
+      "changed_files": [
+        "statistics_helpers.py"
+      ],
+      "checks": {
+        "baseline": {
+          "syntax": "[syntax] no_tests (exit=0, 0.0s) files=0 failed=0",
+          "tests": "[tests] failed (exit=1, 0.1s) failed=1 errors=0 passed=4"
+        },
+        "final": {
+          "syntax": "[syntax] passed (exit=0, 0.0s) files=1 failed=0",
+          "tests": "[tests] passed (exit=0, 0.1s) failed=0 errors=0 passed=5"
+        }
+      },
+      "original_unchanged": true,
+      "tests_unchanged": true,
+      "test_integrity": {
+        "checks/__init__.py": true,
+        "checks/test_behavior.py": true
+      },
+      "http_calls": 3,
+      "http_seconds": 27.909336497000368,
+      "prompt_tokens": 1451,
+      "completion_tokens": 226,
+      "stages": [
+        {
+          "stage": "intake",
+          "actions": [
+            "propose_plan"
+          ]
+        },
+        {
+          "stage": "solve",
+          "actions": [
+            "propose_edit"
+          ]
+        },
+        {
+          "stage": "respond",
+          "actions": []
+        }
+      ],
+      "patch_replay": {
+        "check": 0,
+        "apply": 0
+      },
+      "patch_replay_tests": {
+        "returncode": 0,
+        "output": "----------------------------------------------------------------------\nRan 5 tests in 0.001s\n\nOK\n"
+      },
+      "independent_grade": {
+        "status": "passed",
+        "cases": 100
+      }
+    },
+    {
+      "job": "07-baseline-config_fallback",
+      "code_commit": "e5b2d97993e6f26b6cd62747e57f0fbb31b000c3",
+      "status": "no_plan",
+      "seconds": 27.996,
+      "steps": 0,
+      "changed_files": [],
+      "checks": {
+        "baseline": {
+          "syntax": "[syntax] no_tests (exit=0, 0.0s) files=0 failed=0",
+          "tests": "[tests] failed (exit=1, 0.1s) failed=4 errors=0 passed=0"
+        },
+        "final": {
+          "syntax": "[syntax] no_tests (exit=0, 0.0s) files=0 failed=0",
+          "tests": "[tests] failed (exit=1, 0.1s) failed=4 errors=0 passed=0"
+        }
+      },
+      "original_unchanged": true,
+      "tests_unchanged": true,
+      "test_integrity": {
+        "checks/__init__.py": true,
+        "checks/test_behavior.py": true
+      },
+      "http_calls": 8,
+      "http_seconds": 27.751413512,
+      "prompt_tokens": 6224,
+      "completion_tokens": 192,
+      "stages": [
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "tool_name"
+          ]
+        },
+        {
+          "stage": "respond",
+          "actions": []
+        }
+      ],
+      "patch_replay": null,
+      "patch_replay_tests": null,
+      "independent_grade": {
+        "status": "failed",
+        "cases_before_failure": 1,
+        "error": "AssertionError()"
+      }
+    },
+    {
+      "job": "08-baseline-inclusive_range",
+      "code_commit": "e5b2d97993e6f26b6cd62747e57f0fbb31b000c3",
+      "status": "no_plan",
+      "seconds": 26.425,
+      "steps": 0,
+      "changed_files": [],
+      "checks": {
+        "baseline": {
+          "syntax": "[syntax] no_tests (exit=0, 0.0s) files=0 failed=0",
+          "tests": "[tests] failed (exit=1, 0.1s) failed=3 errors=0 passed=1"
+        },
+        "final": {
+          "syntax": "[syntax] no_tests (exit=0, 0.0s) files=0 failed=0",
+          "tests": "[tests] failed (exit=1, 0.1s) failed=3 errors=0 passed=1"
+        }
+      },
+      "original_unchanged": true,
+      "tests_unchanged": true,
+      "test_integrity": {
+        "checks/__init__.py": true,
+        "checks/test_behavior.py": true
+      },
+      "http_calls": 8,
+      "http_seconds": 26.1782631499982,
+      "prompt_tokens": 5733,
+      "completion_tokens": 220,
+      "stages": [
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "tool_name"
+          ]
+        },
+        {
+          "stage": "respond",
+          "actions": []
+        }
+      ],
+      "patch_replay": null,
+      "patch_replay_tests": null,
+      "independent_grade": {
+        "status": "failed",
+        "cases_before_failure": 1,
+        "error": "AssertionError()"
+      }
+    },
+    {
+      "job": "09-baseline-label_normalization",
+      "code_commit": "e5b2d97993e6f26b6cd62747e57f0fbb31b000c3",
+      "status": "budget_exhausted",
+      "seconds": 64.105,
+      "steps": 8,
+      "changed_files": [],
+      "checks": {
+        "baseline": {
+          "syntax": "[syntax] no_tests (exit=0, 0.0s) files=0 failed=0",
+          "tests": "[tests] failed (exit=1, 0.1s) failed=3 errors=0 passed=1"
+        },
+        "final": {
+          "syntax": "[syntax] no_tests (exit=0, 0.0s) files=0 failed=0",
+          "tests": "[tests] failed (exit=1, 0.1s) failed=3 errors=0 passed=1"
+        }
+      },
+      "original_unchanged": true,
+      "tests_unchanged": true,
+      "test_integrity": {
+        "checks/__init__.py": true,
+        "checks/test_behavior.py": true
+      },
+      "http_calls": 16,
+      "http_seconds": 63.84492030599995,
+      "prompt_tokens": 13501,
+      "completion_tokens": 497,
+      "stages": [
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "propose_plan"
+          ]
+        },
+        {
+          "stage": "solve",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "solve",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "solve",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "solve",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "solve",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "solve",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "solve",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "solve",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "respond",
+          "actions": []
+        }
+      ],
+      "patch_replay": null,
+      "patch_replay_tests": null,
+      "independent_grade": {
+        "status": "failed",
+        "cases_before_failure": 3,
+        "error": "AssertionError()"
+      }
+    },
+    {
+      "job": "10-baseline-median_even",
+      "code_commit": "e5b2d97993e6f26b6cd62747e57f0fbb31b000c3",
+      "status": "budget_exhausted",
+      "seconds": 53.601,
+      "steps": 8,
+      "changed_files": [],
+      "checks": {
+        "baseline": {
+          "syntax": "[syntax] no_tests (exit=0, 0.0s) files=0 failed=0",
+          "tests": "[tests] failed (exit=1, 0.1s) failed=1 errors=0 passed=4"
+        },
+        "final": {
+          "syntax": "[syntax] no_tests (exit=0, 0.0s) files=0 failed=0",
+          "tests": "[tests] failed (exit=1, 0.1s) failed=1 errors=0 passed=4"
+        }
+      },
+      "original_unchanged": true,
+      "tests_unchanged": true,
+      "test_integrity": {
+        "checks/__init__.py": true,
+        "checks/test_behavior.py": true
+      },
+      "http_calls": 16,
+      "http_seconds": 53.34226602099807,
+      "prompt_tokens": 13917,
+      "completion_tokens": 409,
+      "stages": [
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "intake",
+          "actions": [
+            "propose_plan"
+          ]
+        },
+        {
+          "stage": "solve",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "solve",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "solve",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "solve",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "solve",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "solve",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "solve",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "solve",
+          "actions": [
+            "list_dir"
+          ]
+        },
+        {
+          "stage": "respond",
+          "actions": []
+        }
+      ],
+      "patch_replay": null,
+      "patch_replay_tests": null,
+      "independent_grade": {
+        "status": "failed",
+        "cases_before_failure": 0,
+        "error": "AssertionError()"
+      }
+    }
+  ],
+  "fixture_sha256": {
+    "smoke": {
+      "calc.py": "d7a0675937902d41cf02f97f8287d51bbd1dcedd6a3217df317be2980dce770c",
+      "checks/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "checks/addition_smoke.py": "a2d25dbaa77eec67656f82e3e5e787b5b87ae567f70b5668690621b2d8acc2c7"
+    },
+    "config_fallback": {
+      "checks/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "checks/test_behavior.py": "cecb680f1ed996c840d17b6cc4436a0f390c2a0ee60b0c3e06a807ac08f8c7db",
+      "configuration.py": "f3a2fed0c5edd1297159ffba8b966bd7f3081df76261c960d645ba5ce4209509"
+    },
+    "inclusive_range": {
+      "checks/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "checks/test_behavior.py": "638e5b096df8c1591d1b9a4a1a015d9a90be81ef34dfe1082a4884b050c70be9",
+      "intervals.py": "92c9f9dbb62f645a1c49002087c84e63fe855f66b216480d8c5292ebf018b42a"
+    },
+    "label_normalization": {
+      "checks/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "checks/test_behavior.py": "74a5ef8ed533c451c31b51b83f202fbad95575e905731841eefdf7e93cab1a30",
+      "labels.py": "ef4c80a082b33c12693759972bdcfe7809a74838de3d5a4c59699a43dcd74340"
+    },
+    "median_even": {
+      "checks/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "checks/test_behavior.py": "4810c41bf6b056d4966b8afa62db396daa34a3cbc84d17ee284a89854fd4bed8",
+      "statistics_helpers.py": "c6adc0ba42c12ee615ce574524196e29e8eecd25bfca54c42c5ea4ab3eb9db40"
+    }
+  }
+}

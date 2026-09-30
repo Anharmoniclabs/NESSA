@@ -1,0 +1,42 @@
+{
+  "smoke": {
+    "task": "Fix add(a, b) so it returns the sum for positive, negative and zero values. Preserve the tests.",
+    "files": {
+      "calc.py": "\"\"\"Deliberately incorrect smoke-test fixture, never imported by the harness itself.\"\"\"\n\n\ndef add(a, b):\n    return a - b\n",
+      "checks/__init__.py": "",
+      "checks/addition_smoke.py": "import unittest\nfrom calc import add\n\n\nclass AdditionSmoke(unittest.TestCase):\n    def test_positive(self):\n        self.assertEqual(add(2, 3), 5)\n\n    def test_negative(self):\n        self.assertEqual(add(-4, 2), -2)\n\n    def test_zero(self):\n        self.assertEqual(add(0, 7), 7)\n"
+    }
+  },
+  "config_fallback": {
+    "task": "Repair setting(options, key, default=None) in configuration.py. Existing keys must retain their exact values, including 0, False, empty strings, and None. Use default only when the key is missing. Do not mutate options. Preserve the tests.",
+    "files": {
+      "checks/__init__.py": "",
+      "checks/test_behavior.py": "from configuration import setting\nimport unittest\nclass SettingsTests(unittest.TestCase):\n    def test_falsey(self):\n        for value in [0,False,'',None]:\n            with self.subTest(value=value): self.assertEqual(setting({'x':value},'x',99),value)\n    def test_missing(self): self.assertEqual(setting({},'x',99),99)\n    def test_existing(self): self.assertEqual(setting({'x':7},'x',99),7)\n    def test_no_mutation(self):\n        x={'a':1};setting(x,'b',3);self.assertEqual(x,{'a':1})\n",
+      "configuration.py": "def setting(options, key, default=None):\n    \"\"\"Return an existing setting, including falsey values; use default only if missing.\"\"\"\n    return options.get(key) or default\n"
+    }
+  },
+  "inclusive_range": {
+    "task": "Fix inclusive_numbers(start, end) in intervals.py to include both endpoints. Return an empty list for descending bounds. Preserve all tests.",
+    "files": {
+      "checks/__init__.py": "",
+      "checks/test_behavior.py": "from intervals import inclusive_numbers\nimport unittest\nclass IntervalTests(unittest.TestCase):\n    def test_both_endpoints(self): self.assertEqual(inclusive_numbers(2,5),[2,3,4,5])\n    def test_singleton(self): self.assertEqual(inclusive_numbers(4,4),[4])\n    def test_negative(self): self.assertEqual(inclusive_numbers(-2,1),[-2,-1,0,1])\n    def test_descending(self): self.assertEqual(inclusive_numbers(5,2),[])\n",
+      "intervals.py": "def inclusive_numbers(start, end):\n    \"\"\"Return all integers from start through end, or an empty list when start > end.\"\"\"\n    return list(range(start, end))\n"
+    }
+  },
+  "label_normalization": {
+    "task": "Correct normalize_label(label) in labels.py so it removes leading and trailing whitespace and lowercases the remaining text while preserving internal spaces. Empty or whitespace-only labels should return an empty string. Preserve tests.",
+    "files": {
+      "checks/__init__.py": "",
+      "checks/test_behavior.py": "from labels import normalize_label\nimport unittest\nclass LabelTests(unittest.TestCase):\n    def test_edges(self): self.assertEqual(normalize_label('  HeLLo  '),'hello')\n    def test_internal(self): self.assertEqual(normalize_label(' Two Words '),'two words')\n    def test_whitespace(self): self.assertEqual(normalize_label(' \\t\\n '),'')\n    def test_empty(self): self.assertEqual(normalize_label(''),'')\n",
+      "labels.py": "def normalize_label(label):\n    \"\"\"Return the label lowercase with whitespace trimmed from both ends.\"\"\"\n    return label.lower()\n"
+    }
+  },
+  "median_even": {
+    "task": "Repair median(values) in statistics_helpers.py: odd-length inputs return the middle sorted value, even-length inputs return the arithmetic mean of the two middle values. Preserve ValueError for empty input and do not mutate the input. Preserve all tests.",
+    "files": {
+      "checks/__init__.py": "",
+      "checks/test_behavior.py": "from statistics_helpers import median\nimport unittest\nclass MedianTests(unittest.TestCase):\n    def test_even(self): self.assertEqual(median([8,2,4,6]),5)\n    def test_odd(self): self.assertEqual(median([8,2,4]),4)\n    def test_single(self): self.assertEqual(median([6]),6)\n    def test_empty(self):\n        with self.assertRaises(ValueError): median([])\n    def test_input_unchanged(self):\n        x=[8,2,4,6];median(x);self.assertEqual(x,[8,2,4,6])\n",
+      "statistics_helpers.py": "def median(values):\n    \"\"\"Median of a nonempty numeric sequence, leaving the input unchanged.\"\"\"\n    if not values:\n        raise ValueError(\"values must be nonempty\")\n    ordered = sorted(values)\n    mid = len(ordered) // 2\n    return ordered[mid]\n"
+    }
+  }
+}
