@@ -443,6 +443,22 @@ class ThreeStageTests(unittest.TestCase):
         self.assertIn("module0.py", json.dumps(after["current_observations"]))
         self.assertEqual(after["last_outcome"], "Read completed. No edit was applied.")
 
+    def test_reread_becomes_newest_after_context_trimming(self):
+        for i in range(2):
+            (self.project / f"module{i}.py").write_text((f"# module {i} " + "x" * 750 + "\n") * 12)
+        self.ws = AtomicWorkspace.create(self.project, self.tmp / "context-refresh-work")
+        steps = [call("read_file", {"path": "module0.py"}),
+                 call("read_file", {"path": "module1.py"}),
+                 call("read_file", {"path": "module0.py"}),
+                 call("propose_plan", PLAN), call("report_blocker", BLOCK), "done"]
+        result = self.agent(steps, context_chars=8000).run("Fix addition")
+        self.assertEqual(result.status, "blocked")
+        before = json.loads(self.client.seen[2][0][1]["content"])
+        after = json.loads(self.client.seen[3][0][1]["content"])
+        self.assertNotIn("module0.py", json.dumps(before["current_observations"]))
+        self.assertIn("module0.py", json.dumps(after["current_observations"]))
+        self.assertNotIn("module1.py", json.dumps(after["current_observations"]))
+
 
 class HTTPIntegration(unittest.TestCase):
     def test_cli_round_trip_native_and_text(self):

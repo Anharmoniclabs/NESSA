@@ -318,6 +318,7 @@ class ThreeStageAgent(Agent):
             if path == self.pending_read:
                 self.pending_read = ""
         key = f"{call.name}:{json.dumps(args, sort_keys=True)}"
+        self.observations.pop(key, None)
         self.observations[key] = clip(out, min(self.config.tool_output_chars, 6000))
         while len(self.observations) > 5:
             del self.observations[next(iter(self.observations))]
