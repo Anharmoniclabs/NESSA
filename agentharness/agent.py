@@ -130,7 +130,7 @@ class Agent:
                  lessons: list[str] = (), policy: ActionPolicy | None = None,
                  evidence_dir: Path | None = None, reviewer=None,
                  skills: SkillRegistry | None = None,
-                 project_instructions: ProjectInstructions | None = None):
+                 project_instructions: ProjectInstructions | None = None, event_log=None):
         self.client = client
         self.ws = ws
         self.config = config or AgentConfig()
@@ -145,7 +145,7 @@ class Agent:
         self.project_instructions = project_instructions or ProjectInstructions(ws.repo)
         self.skills = skills or SkillRegistry(ws.repo)
         self.dev = DevProcessManager(ws, self.evidence_dir)
-        self.log = EventLog(self.evidence_dir / "events.jsonl")
+        self.log = event_log if event_log is not None else EventLog(self.evidence_dir / "events.jsonl")
         self.tools = build_tools(self.config.allow_shell, self.config.allow_extract)
         self.active_skills: list[str] = []
         self.edit_count = 0

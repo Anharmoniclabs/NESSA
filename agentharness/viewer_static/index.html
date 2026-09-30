@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>NESSA · Run evidence</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body>
+<header class="topbar"><div class="brand"><span class="mark">N</span><div><strong>NESSA</strong><span class="sub">LOCAL RUN VIEWER</span></div></div><div class="top-right"><span class="readonly">Read-only</span><span id="connection" role="status">Connecting…</span><button id="refresh" type="button">Refresh</button></div></header>
+<div class="layout"><aside><div class="sidebar-heading"><h1>Run history</h1><span id="run-count" class="muted">—</span></div><label class="search-label" for="search">Find a run</label><input id="search" type="search" placeholder="Name, model, or status" autocomplete="off"><label class="follow"><input type="checkbox" id="follow" checked> Follow most recently updated</label><div id="list-warning" class="notice hidden"></div><nav id="runs" aria-label="Recorded runs"><p class="empty">Reading local evidence…</p></nav><footer>No model calls or project changes<br>Refreshes every 10 seconds while visible</footer></aside>
+<main id="main" aria-live="polite"><div class="welcome"><span class="eyebrow">REAL EVIDENCE, LOCAL ONLY</span><h2>Your runs, as recorded</h2><p>Select a run to inspect its controller status, approved scope, checks, and patch.</p><p>No sample results are generated.</p></div></main></div>
+</body></html>

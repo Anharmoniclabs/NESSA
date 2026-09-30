@@ -456,6 +456,11 @@ command on every run.
 
 ### Phase B - durable session/context engine
 
+A narrow opt-in first slice is documented in [DURABLE_RESUME.md](DURABLE_RESUME.md):
+one approved Python code-only stage, bounded explicit resume, exact edit
+reconciliation and pinned check receipts. General tool/process recovery remains
+unimplemented; the larger phase below is not claimed complete.
+
 - event-sourced session state
 - restart-safe checkpoint manifest
 - context digest
