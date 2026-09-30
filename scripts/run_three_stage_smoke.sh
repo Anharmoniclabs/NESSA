@@ -11,7 +11,8 @@ if ! command -v ollama >/dev/null 2>&1; then
   echo 'Ollama is not installed. Start your existing local model server before running this smoke test.' >&2
   exit 1
 fi
-if [[ "$base" == http://127.0.0.1:11434/v1 || "$base" == http://localhost:11434/v1 ]]; then
+if [[ "$base" == http://127.0.0.1:11434/v1 || "$base" == http://localhost:11434/v1 ||
+      "$base" == http://127.0.0.1:11434 || "$base" == http://localhost:11434 ]]; then
   if ! OLLAMA_HOST=127.0.0.1:11434 ollama list >/dev/null 2>&1; then
     echo "Starting installed Ollama on loopback; log: $runs/ollama.log"
     nohup env OLLAMA_HOST=127.0.0.1:11434 ollama serve >>"$runs/ollama.log" 2>&1 < /dev/null &

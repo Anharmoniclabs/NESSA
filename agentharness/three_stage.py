@@ -573,7 +573,10 @@ class ThreeStageAgent(Agent):
             if old_tokens is not None:
                 self.client.max_tokens = min(old_tokens, self.config.respond_tokens)
             reply = self.client.chat(messages, None, set())
-            self.respond = {"status": "recorded", "advisory_text": clip(reply.content or "", 1200),
+            native_incomplete = (getattr(reply, "transport_metadata", {}).get("transport") == "ollama-native"
+                                 and reply.finish_reason == "length")
+            self.respond = {"status": "incomplete" if native_incomplete else "recorded",
+                            "advisory_text": "" if native_incomplete else clip(reply.content or "", 1200),
                             "authoritative": False, "ignored_tool_calls": len(reply.tool_calls)}
             self.transcript.append({"stage": self.stage, "messages": messages, "reply": asdict(reply)})
         except Exception as exc:
@@ -588,7 +591,8 @@ class ThreeStageAgent(Agent):
         self.task = task
         self.active_started = time.monotonic()
         self.log("start", mode=VERSION, task=task, config=asdict(self.config),
-                 model=getattr(self.client, "model", None))
+                 model=getattr(self.client, "model", None),
+                 transport=getattr(self.client, "metadata", None))
         status, error = "error", ""
         try:
             # v1 always takes baseline evidence, including missing-check statuses.
@@ -621,6 +625,7 @@ class ThreeStageAgent(Agent):
         (self.evidence_dir / "patch.diff").write_text(result.patch)
         (self.evidence_dir / "result.json").write_text(json.dumps({**result.to_dict(), "mode": VERSION,
             "solve_mode": self.config.solve_mode,
+            "transport": getattr(self.client, "metadata", None),
             "approval_seconds": round(self.approval_seconds, 3),
             "active_seconds": round(result.seconds - self.approval_seconds, 3),
             "response_stage": self.respond}, indent=2))
@@ -638,6 +643,12 @@ def main(argv=None) -> int:
     p.add_argument("--work")
     p.add_argument("--base-url", default=os.environ.get("AGENT_BASE_URL", "http://127.0.0.1:11434/v1"))
     p.add_argument("--model", default=os.environ.get("AGENT_MODEL", "qwen2.5-coder:1.5b"))
+    p.add_argument("--transport", choices=("openai", "ollama-native"), default="openai",
+                   help="opt-in native Ollama API; default OpenAI-compatible transport is unchanged")
+    p.add_argument("--ollama-think", help="required native mode: true, false, or exact advertised level")
+    p.add_argument("--ollama-num-ctx", type=int, default=8192)
+    p.add_argument("--ollama-num-thread", type=int, default=2)
+    p.add_argument("--ollama-seed", type=int, default=42)
     p.add_argument("--text-tools", action="store_true")
     p.add_argument("--solve-mode", choices=("tools", "code-only"), default="tools",
                    help="experimental code-only solve for exactly one approved Python file")
@@ -654,6 +665,10 @@ def main(argv=None) -> int:
     try:
         if not math.isfinite(a.timeout) or a.timeout <= 0 or a.max_tokens < 1:
             p.error("--timeout must be finite and positive; --max-tokens must be positive")
+        if a.transport == "ollama-native" and a.ollama_think is None:
+            p.error("--ollama-think is required with --transport ollama-native")
+        if a.transport != "ollama-native" and a.ollama_think is not None:
+            p.error("--ollama-think requires --transport ollama-native")
         project = Path(a.project).resolve()
         if a.work and Path(a.work).exists() and any(Path(a.work).iterdir()):
             p.error("--work must be absent, empty or a new directory; existing evidence is preserved")
@@ -670,7 +685,15 @@ def main(argv=None) -> int:
             tool_mode="text" if a.text_tools else "native", allow_shell=False, allow_extract=False,
             solve_mode=a.solve_mode,
             verify=tuple(n for n in a.verify.split(",") if n))
-        client = ChatClient(a.base_url, a.model, max_tokens=a.max_tokens, timeout=a.timeout, retries=1)
+        if a.transport == "ollama-native":
+            from .ollama import OllamaClient
+            think = {"true": True, "false": False}.get(a.ollama_think, a.ollama_think)
+            client = OllamaClient(a.base_url, a.model, think=think, max_tokens=a.max_tokens,
+                timeout=a.timeout, num_ctx=a.ollama_num_ctx, num_thread=a.ollama_num_thread,
+                seed=a.ollama_seed)
+            client.discover()
+        else:
+            client = ChatClient(a.base_url, a.model, max_tokens=a.max_tokens, timeout=a.timeout, retries=1)
         agent = ThreeStageAgent(client, ws, config=cfg, checks=CheckRunner(checks, timeout=a.timeout),
                                 approver=None if a.auto_approve else cli_approver)
         print(f"Mode: {VERSION}\nWorking copy: {ws.repo}")
