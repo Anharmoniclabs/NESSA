@@ -64,7 +64,7 @@ class ThreeStageTests(unittest.TestCase):
                             native=False, tool_mode="text").run("Fix addition")
         self.assertEqual(result.status, "verified", result.summary)
         solve_prompt = self.client.seen[1][0][0]["content"]
-        for arg in ('"path"', '"old"', '"new"'):
+        for arg in ('path: string', 'old: string', 'new: string'):
             self.assertIn(arg, solve_prompt)
         self.assertNotIn('"name":"finish"', solve_prompt)
         self.assertNotIn("replace_in_file", solve_prompt)
@@ -338,6 +338,110 @@ class ThreeStageTests(unittest.TestCase):
         for folder in ("build", "dist", ".venv"):
             with self.subTest(folder=folder), self.assertRaisesRegex(ToolError, "exportable"):
                 agent._validate_plan({**PLAN, "files": [folder + "/module.py"]})
+
+    def test_file_as_directory_gets_exact_read_hint_and_narrowed_menu(self):
+        def read_guided(messages):
+            system, packet = messages[0]["content"], json.loads(messages[1]["content"])
+            self.assertEqual(packet["next_read_path"], "calc.py")
+            self.assertIn('"name":"read_file","arguments":{"path":"calc.py"}', system)
+            self.assertNotIn("list_dir(", system)
+            self.assertNotIn('"properties"', system)
+            self.assertIn("is a file, not a directory", packet["last_outcome"])
+            self.assertEqual(packet["recent_actions"][-1]["action"], "list_dir")
+            return call("read_file", {"path": "calc.py"})
+        approvals = []
+        result = self.agent([call("list_dir", {"path": "calc.py", "depth": 1}), read_guided,
+            call("propose_plan", PLAN), call("propose_edit", EDIT), "done"],
+            native=False, tool_mode="text", approver=lambda p: (approvals.append(p) or True, "")).run("Fix addition")
+        self.assertEqual(result.status, "verified")
+        self.assertEqual(approvals, [PLAN])
+
+    def test_exact_real_intake_failure_replay_preserves_approval_gate(self):
+        approvals = []
+        malformed = {"type": "object", "properties": {"goal": {"type": "string"}}}
+        steps = [call("list_dir", {"path": "calc.py", "depth": 1}) for _ in range(6)]
+        steps += [call("tool_name", malformed), "No changes were made"]
+        agent = self.agent(steps, native=False, tool_mode="text", plan_steps=6,
+                          approver=lambda p: (approvals.append(p) or True, ""))
+        result = agent.run("Fix addition")
+        self.assertEqual(result.status, "no_plan")
+        self.assertEqual(approvals, [])
+        self.assertEqual(result.patch, "")
+        packets = [json.loads(messages[1]["content"]) for messages, _ in self.client.seen[:7]]
+        self.assertEqual(packets[5]["recent_actions"][-1]["repeat_count"], 5)
+        self.assertNotEqual(packets[1], packets[2])
+        final_prompt = self.client.seen[6][0][0]["content"]
+        self.assertNotIn('"name":"tool_name"', final_prompt)
+        self.assertNotIn('"properties"', final_prompt)
+        self.assertIn('"name":"propose_plan"', final_prompt)
+
+    def test_plan_only_example_is_valid_and_uses_actual_renamed_source(self):
+        (self.project / "calc.py").rename(self.project / "arithmetic.py")
+        self.ws = AtomicWorkspace.create(self.project, self.tmp / "renamed-work")
+        agent = self.agent([call("propose_plan", PLAN)])
+        agent.task = "Repair arithmetic behavior"
+        example = agent._example(["propose_plan"])
+        self.assertEqual(example["arguments"]["files"], ["arithmetic.py"])
+        self.assertEqual(agent._validate_plan(example["arguments"])["files"], ["arithmetic.py"])
+        self.assertNotIn("calc.py", agent._text_contract(["propose_plan"]))
+
+    def test_duplicate_successful_read_is_bounded_and_remembers_count(self):
+        agent = self.agent([call("list_dir", {"path": "."}), call("list_dir", {"path": "."}),
+                           call("propose_plan", PLAN), call("report_blocker", BLOCK)], plan_steps=4)
+        result = agent.run("Fix addition")
+        self.assertEqual(result.status, "blocked")
+        third_packet = json.loads(self.client.seen[2][0][1]["content"])
+        self.assertIn("Repeated unchanged read attempt #2", third_packet["last_outcome"])
+        self.assertEqual(third_packet["recent_actions"][-1]["repeat_count"], 2)
+
+    def test_smoke_check_file_is_protected_before_approval(self):
+        (self.project / "checks").mkdir()
+        (self.project / "checks/addition_smoke.py").write_text("assert False\n")
+        self.ws = AtomicWorkspace.create(self.project, self.tmp / "protected-smoke-work")
+        approvals = []
+        plan = {**PLAN, "files": ["checks/addition_smoke.py"]}
+        result = self.agent([call("propose_plan", plan)], plan_steps=1,
+            approver=lambda p: (approvals.append(p) or True, "")).run("Fix addition")
+        self.assertEqual(result.status, "no_plan")
+        self.assertEqual(approvals, [])
+        self.assertEqual(result.patch, "")
+
+    def test_unreadable_guided_file_releases_solve_menu_and_keeps_blocker(self):
+        (self.project / "image.png").write_bytes(b"\x00binary")
+        self.ws = AtomicWorkspace.create(self.project, self.tmp / "binary-work")
+        result = self.agent([call("propose_plan", PLAN),
+            call("list_dir", {"path": "image.png"}), call("read_file", {"path": "image.png"}),
+            call("report_blocker", BLOCK), "done"]).run("Fix addition")
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("report_blocker", self.client.seen[2][1])
+        self.assertIn("propose_edit", self.client.seen[3][1])
+        self.assertIsNone(json.loads(self.client.seen[3][0][1]["content"])["next_read_path"])
+        self.assertEqual(result.patch, "")
+
+    def test_repeated_guided_read_releases_menu_without_repeating(self):
+        result = self.agent([call("propose_plan", PLAN), call("read_file", {"path": "calc.py"}),
+            call("list_dir", {"path": "calc.py"}), call("read_file", {"path": "calc.py"}),
+            call("report_blocker", BLOCK), "done"]).run("Fix addition")
+        self.assertEqual(result.status, "blocked")
+        packet = json.loads(self.client.seen[4][0][1]["content"])
+        self.assertIsNone(packet["next_read_path"])
+        self.assertIn("Repeated unchanged read", packet["last_outcome"])
+        self.assertIn("report_blocker", self.client.seen[3][1])
+
+    def test_evicted_observation_can_be_read_again(self):
+        for i in range(6):
+            (self.project / f"module{i}.py").write_text(f"value = {i}\n")
+        self.ws = AtomicWorkspace.create(self.project, self.tmp / "reread-work")
+        steps = [call("read_file", {"path": f"module{i}.py"}) for i in range(6)]
+        steps += [call("read_file", {"path": "module0.py"}), call("propose_plan", PLAN),
+                  call("report_blocker", BLOCK), "done"]
+        result = self.agent(steps, plan_steps=10).run("Fix addition")
+        self.assertEqual(result.status, "blocked")
+        before = json.loads(self.client.seen[6][0][1]["content"])
+        after = json.loads(self.client.seen[7][0][1]["content"])
+        self.assertNotIn("module0.py", json.dumps(before["current_observations"]))
+        self.assertIn("module0.py", json.dumps(after["current_observations"]))
+        self.assertEqual(after["last_outcome"], "Read completed. No edit was applied.")
 
 
 class HTTPIntegration(unittest.TestCase):

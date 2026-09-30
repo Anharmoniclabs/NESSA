@@ -33,6 +33,11 @@ Use `--check 'tests=YOUR TRUSTED TEST COMMAND'` to register the relevant check.
 Text-tool mode is intended for small local models without reliable native tools.
 Native mode is also supported. Both modes reject unknown actions and multiple
 calls as a whole turn; neither automatically switches backend/protocol on errors.
+Text mode uses compact typed action signatures and concrete, snapshot-grounded
+call examples rather than dumping native JSON Schemas. If a file is mistakenly
+passed to `list_dir`, the next inspection menu narrows to `read_file` with that
+verified path. Packets retain the latest three action attempts and repeat counts;
+unchanged duplicate reads are rejected rather than silently retried forever.
 
 ## Three enforced stages, one controller
 
@@ -77,6 +82,7 @@ network or process behavior. Use only trusted projects/check commands or run in
 a separately isolated environment. Existing symlinks are not approved edit targets.
 Known test/config/instruction paths are conservatively protected; the list is not
 an exhaustive detector of every language's testing convention.
+The smoke fixture's `checks/` directory is explicitly included in this protection.
 
 V1 supports exact replacements in existing regular UTF-8 source files. It does
 not support file creation/deletion, test/config edits, new dependencies or shell

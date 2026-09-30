@@ -110,6 +110,11 @@ class ThreeStageAgent(Agent):
         self.active_started = time.monotonic()
         self.respond = {}
         self.authorized_state = self._manifest(self.ws.repo)
+        self.recent_actions: list[dict] = []
+        self.action_counts: dict[str, int] = {}
+        self.pending_read = ""
+        self.read_paths: list[str] = []
+        self.visible_observations: set[str] = set()
 
     @staticmethod
     def _manifest(root):
@@ -143,7 +148,7 @@ class ThreeStageAgent(Agent):
                 p.name.startswith(("jest.config.", "vitest.config.", "playwright.config.")) or
                 p.name.endswith(("_test.py", ".test.js", ".spec.js", ".test.ts", ".spec.ts",
                                  ".test.jsx", ".spec.jsx", ".test.tsx", ".spec.tsx")) or
-                any(part.lower() in ("test", "tests", "__tests__", ".github", ".git", ".agent", ".agents")
+                any(part.lower() in ("test", "tests", "checks", "__tests__", ".github", ".git", ".agent", ".agents")
                     for part in p.parts))
 
     def _validate_plan(self, args: dict) -> dict:
@@ -176,11 +181,60 @@ class ThreeStageAgent(Agent):
                 "project_instructions": instructions,
                 "approved_plan": self.plan, "approved_files": sorted(self.approved_files),
                 "required_checks": self.required_checks,
+                "recent_actions": self.recent_actions[-3:],
+                "next_read_path": self.pending_read or None,
                 "actual_state": {"changed_files": self.ws.changed_files(),
                                  "applied_edits": len(self.ws.journal),
                                  "baseline": {k: v.brief() for k, v in self.baseline.items()},
                                  "final": {k: v.brief() for k, v in self.final.items()}},
                 "current_observations": self.observations, "last_outcome": clip(self.feedback, 5000)}
+
+    def _example(self, offered):
+        # A concrete valid envelope, never the literal name "tool_name" or a
+        # JSON Schema masquerading as arguments. Paths come from this snapshot.
+        candidates = [p for p in self.read_paths if p in self.authorized_state and not self._protected(p)]
+        if not candidates:
+            candidates = sorted(p for p in self.authorized_state if not self._protected(p)
+                                and Path(p).suffix in (".py", ".js", ".ts", ".go", ".rs", ".java", ".cpp"))
+        if ("propose_plan" in offered and candidates and
+                (offered == ["propose_plan"] or self.read_paths)):
+            return {"name": "propose_plan", "arguments": {"goal": clip(self.task, 300),
+                "steps": ["Apply the requested repair in the listed source file", "Run the registered checks"],
+                "files": candidates[:1], "checks": self.checks.names()[:12]}}
+        if self.stage == "solve" and not self.pending_read:
+            return None
+        path = self.pending_read or (candidates[0] if candidates else "")
+        if "read_file" in offered and path:
+            return {"name": "read_file", "arguments": {"path": path}}
+        if "list_dir" in offered:
+            return {"name": "list_dir", "arguments": {"path": ".", "depth": 1}}
+        return None
+
+    def _text_contract(self, offered):
+        lines = ["Reply with one JSON object: name is the chosen action's name; "
+                 "arguments is an object with that action's named parameters. "
+                 "Do not return a tool definition. Available actions:"]
+        for name in offered:
+            tool = self.tools[name]
+            fields = []
+            for field, spec in tool.params.items():
+                kind = spec["type"]
+                if kind == "array":
+                    kind = "array of " + spec.get("items", {}).get("type", "values")
+                fields.append(f"{field}: {kind}" + (" (optional)" if field not in tool.required else ""))
+            lines.append(f"{name}({'; '.join(fields)}): {tool.description}")
+        example = self._example(offered)
+        if example:
+            lines.append("Valid call shape using this workspace (adapt its content to the task):\n" +
+                         json.dumps(example, separators=(",", ":")))
+        if offered == ["propose_plan"]:
+            lines.append("Now submit your own plan. Use registered check names, not shell commands. "
+                         "The plan will still require approval and applies no edits.")
+        elif self.stage == "solve" and not self.pending_read:
+            lines.append("Current source is already supplied in current_observations. "
+                         "For an edit, choose name propose_edit and put path, old, new inside arguments. "
+                         "Read again only if you need another file region.")
+        return "\n".join(lines)
 
     def _ask_stage(self, offered: list[str]) -> Reply:
         # Every call gets a new compact packet. Attempted planning edits and model
@@ -196,8 +250,7 @@ class ThreeStageAgent(Agent):
                        "There is no finish action. A blocker records failure, not success.")
         schemas = [self.tools[n].schema() for n in offered]
         if self.config.tool_mode == "text":
-            system += '\nReply only as {"name":"tool_name","arguments":{...}}.\n'
-            system += json.dumps(schemas, separators=(",", ":"))
+            system += "\n" + self._text_contract(offered)
         packet = self._packet()
         # Drop oldest observations rather than cut a JSON object or source token.
         while len(system) + len(json.dumps(packet)) > self.config.context_chars and packet["current_observations"]:
@@ -207,6 +260,7 @@ class ThreeStageAgent(Agent):
             raise ModelError("Required stage facts exceed the configured context bound; narrow the task/plan.")
         self.messages = [{"role": "system", "content": system},
                          {"role": "user", "content": json.dumps(packet)}]
+        self.visible_observations = set(packet["current_observations"])
         reply = self.client.chat(self.messages, None if self.config.tool_mode == "text" else schemas,
                                  None)
         self.transcript.append({"stage": self.stage, "messages": self.messages,
@@ -223,15 +277,46 @@ class ThreeStageAgent(Agent):
         if len(reply.tool_calls) != 1:
             raise ToolError("Submit exactly one available tool call; no action was applied.")
         call = reply.tool_calls[0]
+        key = json.dumps([self.stage, call.name, call.arguments, len(self.ws.journal)], sort_keys=True)
+        count = self.action_counts.get(key, 0) + 1
+        self.action_counts[key] = count
+        self.recent_actions.append({"action": call.name, "arguments": clip(json.dumps(call.arguments), 500),
+                                    "repeat_count": count})
+        self.recent_actions = self.recent_actions[-3:]
         if call.name not in offered:
             raise ToolError(f"{call.name!r} is unavailable in {self.stage}. Available: {', '.join(offered)}")
         if not isinstance(call.arguments, dict):
             raise ToolError("Tool arguments must be a JSON object.")
         args = self.tools[call.name].validate(dict(call.arguments))
+        observation_key = f"{call.name}:{json.dumps(args, sort_keys=True)}"
+        if call.name in READ_TOOLS and count > 1 and observation_key in self.visible_observations:
+            if call.name == "read_file":
+                self.pending_read = ""
+            hint = (f" Use read_file with path {self.pending_read!r}." if self.pending_read else
+                    " Use the recorded observation, inspect another file, or propose the plan/edit.")
+            raise ToolError(f"Repeated unchanged read attempt #{count}; do not repeat it." + hint)
         return call, args
 
     def _read(self, call, args):
-        out = self.tools[call.name].handler(self, args)
+        if call.name == "list_dir":
+            path = self.ws.path(args.get("path", "."))
+            if path.is_file():
+                self.pending_read = self.ws.rel(path)
+                raise ToolError(f"{self.pending_read} is a file, not a directory. "
+                                "Next call must read it: " + json.dumps({"name": "read_file",
+                                    "arguments": {"path": self.pending_read}}))
+        try:
+            out = self.tools[call.name].handler(self, args)
+        except ToolError:
+            if call.name == "read_file":
+                self.pending_read = ""
+            raise
+        if call.name == "read_file":
+            path = self.ws.rel(self.ws.path(args["path"]))
+            if path not in self.read_paths:
+                self.read_paths.append(path)
+            if path == self.pending_read:
+                self.pending_read = ""
         key = f"{call.name}:{json.dumps(args, sort_keys=True)}"
         self.observations[key] = clip(out, min(self.config.tool_output_chars, 6000))
         while len(self.observations) > 5:
@@ -245,12 +330,15 @@ class ThreeStageAgent(Agent):
     def _intake(self) -> str | None:
         self.stage = "intake"
         self.log("stage", phase=self.stage)
-        self.observations["project"] = clip(self._intro(self.task), 6000)
+        self.observations["project"] = clip("Project files:\n" + self.ws.list_dir(".", 2) +
+            "\nRegistered check names: " + ", ".join(self.checks.names()), 6000)
         rejections = 0
         for turn in range(self.config.plan_steps + 1):
             if self._expired():
                 return "budget_exhausted"
             offered = list(READ_TOOLS) + ["propose_plan"]
+            if self.pending_read:
+                offered = ["read_file"]
             if turn == self.config.plan_steps:
                 offered = ["propose_plan"]
             try:
@@ -349,12 +437,15 @@ class ThreeStageAgent(Agent):
         self.stage = "solve"
         self.log("stage", phase=self.stage)
         self._refresh_sources()
+        self.pending_read = ""
+        self.recent_actions = []
         self.feedback = "Plan approved. Current files below are the actual unchanged/applied state."
-        offered = list(READ_TOOLS) + ["propose_edit", "report_blocker"]
         for _ in range(self.config.max_steps):
             if self._expired():
                 return "budget_exhausted"
             self.steps += 1
+            offered = (["read_file", "report_blocker"] if self.pending_read else
+                       list(READ_TOOLS) + ["propose_edit", "report_blocker"])
             try:
                 call, args = self._one_call(offered)
                 if call.name in READ_TOOLS:
