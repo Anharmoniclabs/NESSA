@@ -38,6 +38,7 @@ class ThreeStageConfig(AgentConfig):
     max_proposals: int = 3
     context_chars: int = 24000
     respond_tokens: int = 256
+    solve_mode: str = "tools"       # opt-in "code-only": one approved Python file
 
 
 class AtomicWorkspace(Workspace):
@@ -77,6 +78,8 @@ class ThreeStageAgent(Agent):
         config = config or ThreeStageConfig()
         if not config.plan_first:
             raise ValueError("Three-stage mode requires intake and approval.")
+        if config.solve_mode not in ("tools", "code-only"):
+            raise ValueError("solve_mode must be tools or code-only.")
         if config.max_proposals < 1 or config.max_steps < 1 or config.plan_steps < 1:
             raise ValueError("Stage budgets must be positive.")
         if not math.isfinite(config.time_budget) or config.time_budget <= 0:
@@ -435,6 +438,8 @@ class ThreeStageAgent(Agent):
         self.log("checkpoint", edit=self.edit_count, path=str(checkpoint), changed=self.ws.changed_files())
 
     def _solve(self) -> str:
+        if self.config.solve_mode == "code-only":
+            return self._solve_code_only()
         self.stage = "solve"
         self.log("stage", phase=self.stage)
         self._refresh_sources()
@@ -472,6 +477,83 @@ class ThreeStageAgent(Agent):
                 self.feedback = "REJECTED: " + str(exc) + " No proposal was applied by this call."
                 self.log("rejection", phase=self.stage, reason=str(exc))
         return "budget_exhausted"
+
+    def _solve_code_only(self) -> str:
+        from .code_proposals import MAX_SOURCE_CHARS, extract_source, interface, parse_source, validate_interface
+        self.stage = "solve"
+        self.log("stage", phase=self.stage, transport="code-only")
+        if self.plan is None or len(self.approved_files) != 1:
+            raise ToolError("Code-only solve requires approval for exactly one existing Python file.")
+        path = self._path(next(iter(self.approved_files)))
+        if not path.endswith(".py") or self._protected(path):
+            raise ToolError("Code-only solve supports one approved, unprotected .py file; use tools mode otherwise.")
+        original = self.ws._text(self.ws.path(path))
+        if len(original) > MAX_SOURCE_CHARS:
+            raise ToolError("The approved file exceeds the code-only source bound; use tools mode.")
+        try:
+            required_interface = interface(parse_source(original, path))
+        except ToolError as exc:
+            raise ToolError("Code-only solve requires a syntactically valid original with statically "
+                            "supported interfaces; use tools mode for syntax repairs. " + str(exc)) from exc
+        system = ("You are repairing a Python source file. Return only the complete corrected Python source file. "
+                  "Do not return explanations, JSON, Markdown fences, or tool calls. "
+                  "Preserve every existing public function name and signature. Make only the repair requested.")
+        prefix = f"Task:\n{self.task}\n\nCurrent source file {path}:\n"
+        instructions = self.project_instructions.context_for(path)
+        suffix = "\n\nProject instructions:\n" + instructions if instructions else ""
+        feedback_header = "\n\nController feedback on the last proposal:\n"
+        source_budget = min(MAX_SOURCE_CHARS, self.config.context_chars - len(system) - len(prefix) -
+                            len(suffix) - len(feedback_header) - 512)
+        if len(original) > source_budget:
+            raise ToolError("Required context leaves insufficient bounded correction space; use tools mode.")
+        feedback = ""
+        for _ in range(min(self.config.max_steps, self.config.max_proposals)):
+            if self._expired():
+                return "budget_exhausted"
+            self.steps += 1
+            self.ws.read(path)  # register fresh preimage using existing Workspace safety
+            before = self.ws._text(self.ws.path(path))
+            if self.ws._seen.get(path) != sha(before):
+                raise ToolError("Source changed while preparing the code proposal.")
+            if len(before) > source_budget:
+                raise ToolError("Current source exceeds the code-only bound; use tools mode.")
+            body = prefix + before + suffix
+            if feedback:
+                room = self.config.context_chars - len(system) - len(body) - len(feedback_header)
+                body += feedback_header + feedback[:min(5000, max(0, room))]
+            if len(system) + len(body) > self.config.context_chars:
+                raise ModelError("Code-only source and required context exceed the configured bound.")
+            messages = [{"role": "system", "content": system}, {"role": "user", "content": body}]
+            reply = self.client.chat(messages, None, None)
+            self.transcript.append({"stage": "solve", "transport": "code-only",
+                                    "messages": messages, "offered": [], "reply": asdict(reply)})
+            self.log("model", phase="solve", transport="code-only", offered=[],
+                     content=clip(reply.content or "", 2000), prompt_tokens=reply.prompt_tokens)
+            if self._expired():
+                raise StageBudgetExceeded("Stage time budget expired before source proposal apply.")
+            try:
+                if reply.native or reply.finish_reason == "length":
+                    raise ToolError("Expected a complete source proposal, not native tool calls or truncated output.")
+                source = extract_source(reply.content, path)
+                if len(source) > source_budget:
+                    raise ToolError("Replacement exceeds the correction-safe context bound; no edit was applied.")
+                if source == before:
+                    raise ToolError("The proposed source is unchanged; no edit was applied. Produce the requested repair.")
+                validate_interface(source, path, required_interface)
+                self._apply({"path": path, "old": before, "new": source})
+                self.log("source_proposal", path=path, before_sha256=hashlib.sha256(before.encode()).hexdigest(),
+                         after_sha256=hashlib.sha256(source.encode()).hexdigest(),
+                         signature_guard="passed", applied=True)
+                self.final = self._verify()
+                if self._verified():
+                    return "verified"
+                feedback = "The edit was applied, but required checks did not pass. Repair the current source.\n" + "\n".join(
+                    f"{r.brief()}\n{clip(r.output, 2000)}" for r in self.final.values())
+            except ToolError as exc:
+                feedback = "Proposal rejected before apply: " + str(exc)
+                self.log("rejection", phase="solve", transport="code-only", reason=str(exc))
+            self.feedback = feedback
+        return "failed_checks" if self.ws.changed_files() else "no_change"
 
     def _respond(self, status):
         self.stage = "respond"
@@ -538,6 +620,7 @@ class ThreeStageAgent(Agent):
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
         (self.evidence_dir / "patch.diff").write_text(result.patch)
         (self.evidence_dir / "result.json").write_text(json.dumps({**result.to_dict(), "mode": VERSION,
+            "solve_mode": self.config.solve_mode,
             "approval_seconds": round(self.approval_seconds, 3),
             "active_seconds": round(result.seconds - self.approval_seconds, 3),
             "response_stage": self.respond}, indent=2))
@@ -556,6 +639,8 @@ def main(argv=None) -> int:
     p.add_argument("--base-url", default=os.environ.get("AGENT_BASE_URL", "http://127.0.0.1:11434/v1"))
     p.add_argument("--model", default=os.environ.get("AGENT_MODEL", "qwen2.5-coder:1.5b"))
     p.add_argument("--text-tools", action="store_true")
+    p.add_argument("--solve-mode", choices=("tools", "code-only"), default="tools",
+                   help="experimental code-only solve for exactly one approved Python file")
     p.add_argument("--auto-approve", action="store_true")
     p.add_argument("--max-steps", type=int, default=8)
     p.add_argument("--plan-steps", type=int, default=6)
@@ -583,6 +668,7 @@ def main(argv=None) -> int:
         cfg = ThreeStageConfig(require_approval=not a.auto_approve, max_steps=a.max_steps,
             plan_steps=a.plan_steps, max_proposals=a.max_proposals, time_budget=a.time_budget,
             tool_mode="text" if a.text_tools else "native", allow_shell=False, allow_extract=False,
+            solve_mode=a.solve_mode,
             verify=tuple(n for n in a.verify.split(",") if n))
         client = ChatClient(a.base_url, a.model, max_tokens=a.max_tokens, timeout=a.timeout, retries=1)
         agent = ThreeStageAgent(client, ws, config=cfg, checks=CheckRunner(checks, timeout=a.timeout),
