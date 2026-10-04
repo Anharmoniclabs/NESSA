@@ -11,6 +11,7 @@ Final statuses (exactly one per run):
     budget_exhausted  step or time budget used up
     rejected / no_plan  the plan was not approved / never proposed
     error           the model server or harness failed
+    answered / awaiting_input / blocked / cancelled  conversational or interrupted states
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ from .dev import DevProcessManager
 from .llm import ContextOverflow, ModelError, Reply, ToolCall
 from .policy import ActionPolicy, apply_policy
 from .skills import SkillRegistry
+from .session import SessionStore, atomic_json, bounded_context
 from .tools import build_tools
 from .workspace import ToolError, Workspace
 
@@ -41,7 +43,8 @@ How to work:
 checks; if they fail you will be asked to fix them.
 
 Rules:
-- Act through a tool call every turn. Nobody will answer questions.
+- Act through a tool call every turn. Use ask_user when an essential answer is missing.
+- Use respond for a direct informational answer, blocked to report a dependency, or finish for coding completion.
 - A tool error is a message for you: read it and adjust instead of repeating the same call.
 - Do not weaken or delete tests to make them pass unless the task says so.
 - If you are stuck, call finish and say exactly what blocked you. An honest partial result beats a fake success."""
@@ -53,11 +56,10 @@ Call a tool by replying with exactly one JSON object and nothing else:
 Available tools:
 """
 
-ELIDED = "[older tool output removed to save context; call the tool again if you need it]"
-
-
 @dataclass
 class AgentConfig:
+    max_context_chars: int = 80000
+    max_calls_per_turn: int = 8
     max_steps: int = 40            # execute-phase model turns
     plan_steps: int = 10           # read-only turns allowed before propose_plan
     plan_first: bool = True
@@ -99,17 +101,24 @@ class RunResult:
 class EventLog:
     """Ordered, append-only evidence of everything the run did."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, callback=None):
+        self.callback = callback
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text("")
         self.seq = 0
+        if self.path.exists():
+            with self.path.open() as f:
+                for line in f:
+                    self.seq = max(self.seq, json.loads(line)['seq'])
 
     def __call__(self, event: str, /, **data):
         self.seq += 1
         with self.path.open("a") as f:
             f.write(json.dumps({"seq": self.seq, "t": round(time.time(), 3), "event": event, **data},
                                default=str) + "\n")
+            f.flush()
+        if self.callback:
+            self.callback(event, data)
 
 
 def clip(text: str, limit: int) -> str:
@@ -130,7 +139,7 @@ class Agent:
                  lessons: list[str] = (), policy: ActionPolicy | None = None,
                  evidence_dir: Path | None = None, reviewer=None,
                  skills: SkillRegistry | None = None,
-                 project_instructions: ProjectInstructions | None = None):
+                 project_instructions: ProjectInstructions | None = None, on_event=None):
         self.client = client
         self.ws = ws
         self.config = config or AgentConfig()
@@ -145,7 +154,17 @@ class Agent:
         self.project_instructions = project_instructions or ProjectInstructions(ws.repo)
         self.skills = skills or SkillRegistry(ws.repo)
         self.dev = DevProcessManager(ws, self.evidence_dir)
-        self.log = EventLog(self.evidence_dir / "events.jsonl")
+        self.log = EventLog(self.evidence_dir / "events.jsonl", on_event)
+        self.store = SessionStore(self.evidence_dir)
+        self.plan = None
+        self.phase = "plan" if self.config.plan_first else "execute"
+        self.latest_checks = {}
+        self.last_observation = ""
+        self.elapsed = 0.0
+        self.user_messages = []
+        self.plan_terminal = None
+        self.uncertain_calls = set()
+        self.schema_chars = 0
         self.tools = build_tools(self.config.allow_shell, self.config.allow_extract)
         self.active_skills: list[str] = []
         self.edit_count = 0
@@ -167,6 +186,7 @@ class Agent:
 
     def run_check(self, name: str, extra: str = "") -> str:
         r = self.checks.run(name, self.ws, extra)
+        self.latest_checks[name] = r.brief()
         self.log("check", phase="agent", **{**r.to_dict(), "output": clip(r.output, 2000)})
         return r.brief() + "\n" + r.output
 
@@ -205,6 +225,7 @@ class Agent:
             result = self.checks.run(name, self.ws)
             self.log("check", phase="continuous", edit=self.edit_count,
                      **{**result.to_dict(), "output": clip(result.output, 2000)})
+            self.latest_checks[name] = result.brief()
             check_briefs.append(result.brief())
             reports.append(result.brief() + ("\n" + clip(result.output, 2500) if result.output else ""))
 
@@ -217,30 +238,38 @@ class Agent:
 
     # ------------------------------------------------------------ model I/O
 
-    def _system(self) -> str:
+    def _system(self, offered=None) -> str:
         if self.config.tool_mode != "text":
             return SYSTEM_PROMPT
-        lines = [f"- {t.name}({', '.join(t.params)}): {t.description}" for t in self.tools.values()]
+        lines = [f"- {t.name}: {t.description} schema=" + json.dumps(t.schema()["function"]["parameters"])
+                 for t in self.tools.values() if offered is None or t.name in offered]
         return SYSTEM_PROMPT + TEXT_MODE_SUFFIX + "\n".join(lines)
 
     def _ask(self, offered: list[str]) -> Reply:
-        schemas = None if self.config.tool_mode == "text" else [self.tools[n].schema() for n in offered]
+        schemas = None if self.config.tool_mode == 'text' else [self.tools[n].schema() for n in offered]
+        self.schema_chars = len(json.dumps(schemas)) if schemas else 0
+        self.messages[0]['content'] = self._system(offered)
+        self._compact()
+        self._save_session('running')
+        model_started = time.monotonic()
         try:
             reply = self.client.chat(self.messages, schemas, set(offered))
         except ContextOverflow:
-            self._compact(keep_last=2)
+            self._compact(keep_last=2, force=True)
             reply = self.client.chat(self.messages, schemas, set(offered))
         if reply.prompt_tokens > self.config.compact_at_tokens:
-            self._compact()
+            self._compact(force=True)
         if reply.native:
             self.messages.append({"role": "assistant", "content": reply.content or "",
                                   "tool_calls": reply.raw_tool_calls})
             self._call_idx.append(len(self.messages) - 1)
         else:
             self.messages.append({"role": "assistant", "content": reply.content or ""})
+        self.log("message", message=self.messages[-1])
         self.log("model", content=clip(reply.content or "", 2000), reasoning=clip(reply.reasoning or "", 2000),
                  calls=[{"name": c.name, "args": c.arguments} for c in reply.tool_calls],
-                 native=reply.native, prompt_tokens=reply.prompt_tokens)
+                 native=reply.native, prompt_tokens=reply.prompt_tokens,
+                 seconds=round(time.monotonic() - model_started, 3))
         return reply
 
     def _deliver(self, reply: Reply, results: list[tuple[ToolCall, str]]):
@@ -250,43 +279,95 @@ class Agent:
                 self.messages.append({"role": "tool", "tool_call_id": call.id, "name": call.name,
                                       "content": clip(text, limit)})
                 self._result_idx.append(len(self.messages) - 1)
+                self.log("message", message=self.messages[-1])
         elif results:
             body = "\n\n".join(f"### {c.name} result\n{clip(t, limit)}" for c, t in results)
             self.messages.append({"role": "user", "content": "[tool results]\n" + body})
             self._result_idx.append(len(self.messages) - 1)
+            self.log("message", message=self.messages[-1])
+
+        self._save_session('running')
 
     def _say(self, text: str):
         self.messages.append({"role": "user", "content": text})
         self.log("controller", message=text)
+        self.log("message", message=self.messages[-1])
 
-    def _compact(self, keep_last: int = 6):
-        for i in self._result_idx[:-keep_last]:
-            self.messages[i]["content"] = ELIDED if self.messages[i]["role"] == "tool" \
-                else "[tool results]\n" + ELIDED
-        for i in self._call_idx[:-keep_last]:
-            for c in self.messages[i].get("tool_calls") or []:
-                fn = c.get("function") or {}
-                if len(str(fn.get("arguments", ""))) > 1500:
-                    fn["arguments"] = json.dumps({"elided": "large arguments removed"})
+    def _digest(self) -> dict:
+        return dict(task=self.task, plan=self.plan, phase=self.phase,
+                    project_instructions=self.project_instructions.root_context(),
+                    changed_files=self.ws.changed_files(), checks=self.latest_checks,
+                    active_skills=self.active_skills, user_messages=self.user_messages, steps=self.steps,
+                    remaining_steps=max(0, self.config.max_steps - self.steps),
+                    last_observation=self.last_observation,
+                    evidence_dir=str(self.evidence_dir),
+                    next_step='Inspect current evidence and choose a tool; never replay prior edits blindly.')
+
+    def _save_session(self, status: str) -> None:
+        digest = self._digest()
+        atomic_json(self.evidence_dir / 'context-digest.json', digest)
+        self.store.save(dict(version=1, status=status, task=self.task, plan=self.plan,
+            phase=self.phase, user_messages=self.user_messages, config=asdict(self.config), messages=self.messages,
+            steps=self.steps, edit_count=self.edit_count, active_skills=self.active_skills,
+            latest_checks=self.latest_checks, last_observation=self.last_observation,
+            elapsed=self.elapsed + time.monotonic() - self.started,
+            finish_attempts=self.finish_attempts, baseline={k:v.to_dict() for k,v in self.baseline.items()},
+            journal=self.ws.journal, work_dir=str(self.ws.work_dir),
+            model=getattr(self.client, 'model', None), base_url=getattr(self.client, 'base_url', None),
+            check_names=self.checks.names(),
+            check_commands={k:v for k,v in self.checks.checks.items() if isinstance(v, str)}))
+
+    def _compact(self, keep_last: int = 6, force: bool = False):
+        limit = self.config.max_context_chars - self.schema_chars
+        if force:
+            limit = min(limit, max(1000, len(json.dumps(self.messages, ensure_ascii=False)) * 3 // 4))
+        compact = bounded_context(self.messages, self._digest(), limit, keep_last)
+        if compact is not self.messages:
+            self.log('context_compacted', before=len(self.messages), after=len(compact))
+            self.messages = compact
+            self._result_idx = []
+            self._call_idx = []
+            self._seen_calls.clear()  # elided reads must be retrievable again
 
     # ------------------------------------------------------------ tool dispatch
 
     def _execute(self, call: ToolCall, offered: list[str]) -> str:
+        key = json.dumps([call.name, call.arguments], sort_keys=True, default=str)
+        if key in self.uncertain_calls:
+            return 'ERROR: this operation has an unknown prior outcome. Inspect evidence; automatic replay is blocked.'
+        self._save_session('running')
+        tool = self.tools.get(call.name)
+        receipt = self.store.begin(call.name, call.arguments, call.id, tool.kind if tool else 'unknown')
+        self.log('operation_started', operation_id=receipt['operation_id'], name=call.name)
+        out = self._dispatch(call, offered)
+        status = 'failed' if out.startswith('ERROR:') else 'completed'
+        if out.startswith('exit=') and not out.startswith('exit=0\n'):
+            status = 'failed'
+        if out.startswith('TIMEOUT'):
+            status = 'outcome_unknown'
+            self.uncertain_calls.add(key)
+        self.store.finish(receipt, out, status)
+        self.last_observation = clip(out, 2000)
+        self.log('operation_finished', operation_id=receipt['operation_id'], status=status)
+        return out
+
+    def _dispatch(self, call: ToolCall, offered: list[str]) -> str:
         tool = self.tools.get(call.name)
         if tool is None or call.name not in offered:
             return f"ERROR: tool {call.name!r} is not available now. Available: {', '.join(offered)}"
         if call.arguments is None:
             return "ERROR: the arguments were not valid JSON. Send a JSON object matching the tool's parameters."
         try:
-            args = tool.validate(dict(call.arguments))
+            args = tool.validate(call.arguments)
         except ToolError as exc:
             return f"ERROR: {exc}"
         key = json.dumps([call.name, args], sort_keys=True, default=str)
-        if tool.kind == "read" and self._seen_calls.get(key) == self.generation:
+        if tool.kind == "read" and tool.cacheable and self._seen_calls.get(key) == self.generation:
             self.no_progress += 1
             return ("(duplicate: you already made this exact call and nothing has changed since. "
                     "Use that result, or do something different.)")
         self._seen_calls[key] = self.generation
+        before_patch = self.ws.patch() if tool.kind in ("edit", "check", "dev") else None
         try:
             out = tool.handler(self, args)
         except ToolError as exc:
@@ -294,7 +375,7 @@ class Agent:
         except Exception as exc:  # a tool bug must not kill the run; the model sees it
             out = f"ERROR: {type(exc).__name__}: {exc}"
         self.last_tool = call.name
-        edited = tool.kind == "edit" and out.startswith("ok")
+        edited = before_patch is not None and self.ws.patch() != before_patch
         progressed = edited or tool.kind in ("check", "dev")
         if progressed:
             self.generation += 1
@@ -326,21 +407,40 @@ class Agent:
         readers = [n for n, t in self.tools.items() if t.kind == "read"]
         idle = 0
         for turn in range(self.config.plan_steps + 1):
-            offered = readers + ["propose_plan"] if turn < self.config.plan_steps else ["propose_plan"]
+            if self.elapsed + time.monotonic() - self.started > self.config.time_budget:
+                self.plan_terminal = ('budget_exhausted', 'Time budget used during planning.')
+                return None
+            controls = ['propose_plan', 'ask_user', 'respond', 'blocked']
+            offered = readers + controls if turn < self.config.plan_steps else controls
             if turn == self.config.plan_steps:
                 self._say("Time to decide: call propose_plan now.")
             reply = self._ask(offered)
             plan, results = None, []
-            for call in reply.tool_calls:
-                if call.name == "propose_plan":
+            for index, call in enumerate(reply.tool_calls):
+                if self.plan_terminal or index >= self.config.max_calls_per_turn:
+                    results.append((call, 'ERROR: deferred; submit in next turn'))
+                    continue
+                if call.name in ('ask_user', 'respond', 'blocked'):
                     try:
-                        plan = self.tools["propose_plan"].validate(dict(call.arguments or {}))
+                        args = self.tools[call.name].validate(call.arguments)
+                        status, key = {'ask_user': ('awaiting_input', 'question'),
+                                       'respond': ('answered', 'message'),
+                                       'blocked': ('blocked', 'reason')}[call.name]
+                        self.plan_terminal = (status, args[key])
+                        results.append((call, 'Control request recorded.'))
+                    except ToolError as exc:
+                        results.append((call, f'ERROR: {exc}'))
+                elif call.name == "propose_plan":
+                    try:
+                        plan = self.tools["propose_plan"].validate(call.arguments)
                         results.append((call, "Plan submitted for approval."))
                     except ToolError as exc:
                         results.append((call, f"ERROR: {exc}"))
                 else:
                     results.append((call, self._execute(call, offered)))
             self._deliver(reply, results)
+            if self.plan_terminal:
+                return None
             if plan:
                 self.log("plan", plan=plan)
                 return plan
@@ -357,6 +457,8 @@ class Agent:
                   "Do not edit anything yet.")
         for attempt in range(self.config.replan_limit + 1):
             plan = self._plan_round()
+            if self.plan_terminal:
+                return self.plan_terminal[0], None
             if plan is None:
                 return "no_plan", None
             ok, feedback = self.approver(plan)
@@ -375,12 +477,16 @@ class Agent:
         """Decide whether a `finish` request is accepted. Returns (final status or None, message)."""
         if not self.ws.changed_files():
             return "no_change", "Finished with no changes."
-        self.final = {n: self.checks.run(n, self.ws) for n in self.config.verify if n in self.checks.checks}
+        self.final = {n: (self.checks.run(n, self.ws) if n in self.checks.checks else
+                          CheckResult(n, 'no_tests' if n == 'tests' else 'error', output='Check not registered'))
+                      for n in self.config.verify}
         for r in self.final.values():
             self.log("check", phase="verify", **{**r.to_dict(), "output": clip(r.output, 2000)})
-        failing = [r for r in self.final.values() if r.status in ("failed", "timeout")]
+        self.latest_checks.update({k: v.brief() for k,v in self.final.items()})
+        failing = [r for r in self.final.values() if r.status in ('failed', 'timeout', 'setup_error', 'error')]
         if not failing:
-            real = any(r.status == "passed" and r.name != "syntax" for r in self.final.values())
+            real = (all(r.status == 'passed' for r in self.final.values()) and
+                    any(r.name != 'syntax' for r in self.final.values()))
             return ("verified" if real else "unverified"), "Accepted."
         report = "\n\n".join(f"{r.brief()}\n{clip(r.output, 3000)}" for r in failing)
         base = "; ".join(f"{r.brief()}" for r in self.baseline.values())
@@ -397,7 +503,7 @@ class Agent:
             return False
         fb = before.counts.get("failed", 0) + before.counts.get("errors", 0)
         fa = after.counts.get("failed", 0) + after.counts.get("errors", 0)
-        return before.status == "failed" and fa < fb
+        return before.status == "failed" and after.status == "failed" and bool(after.counts) and fa < fb
 
     def _execute_phase(self) -> tuple[str, str]:
         permitted = [n for n in self.tools if n != "propose_plan"]
@@ -405,7 +511,7 @@ class Agent:
         while True:
             if self.steps >= self.config.max_steps:
                 return "budget_exhausted", f"Stopped after {self.steps} steps."
-            if time.monotonic() - self.started > self.config.time_budget:
+            if self.elapsed + time.monotonic() - self.started > self.config.time_budget:
                 return "budget_exhausted", "Time budget used up."
             state = {"phase": "execute", "step": self.steps, "no_progress": self.no_progress,
                      "edits": len(self.ws.journal), "last_tool": self.last_tool}
@@ -421,22 +527,39 @@ class Agent:
                 self._say("Continue by calling a tool. Call finish when the work is done or you are blocked.")
                 continue
             idle = 0
-            results, finish_call = [], None
-            for call in reply.tool_calls:
-                if call.name == "finish" and "finish" in offered:
-                    finish_call = call
+            results, terminal = [], None
+            for index, call in enumerate(reply.tool_calls):
+                if terminal is not None or index >= self.config.max_calls_per_turn:
+                    results.append((call, 'ERROR: deferred; submit in the next turn'))
+                    continue
+                if call.name in ('finish', 'respond', 'ask_user', 'blocked') and call.name in offered:
+                    try:
+                        args = self.tools[call.name].validate(call.arguments)
+                    except ToolError as exc:
+                        results.append((call, f'ERROR: {exc}'))
+                        continue
+                    if call.name == 'finish':
+                        status, message = self._finish_gate()
+                        if status:
+                            terminal = (status, args['summary'])
+                    elif call.name == 'respond':
+                        if self.ws.changed_files():
+                            message = 'ERROR: files changed; use finish so verification runs'
+                        else:
+                            message = 'Response delivered.'
+                            terminal = ('answered', args['message'])
+                    elif call.name == 'ask_user':
+                        message = 'Waiting for user input; resume with the answer.'
+                        terminal = ('awaiting_input', args['question'])
+                    else:
+                        message = 'Dependency blocker recorded.'
+                        terminal = ('blocked', args['reason'])
+                    results.append((call, message))
                 else:
                     results.append((call, self._execute(call, offered)))
-            if finish_call:
-                status, message = self._finish_gate()
-                results.append((finish_call, message))
-                self._deliver(reply, results)
-                if status:
-                    summary = (finish_call.arguments or {}).get("summary", "")
-                    return status, summary
-                self.no_progress = 0
-                continue
             self._deliver(reply, results)
+            if terminal:
+                return terminal
             if self.no_progress >= 2 * self.config.explore_budget:
                 return "stalled", f"{self.no_progress} actions in a row without a change."
             if self.no_progress >= self.config.explore_budget and not nudged:
@@ -446,31 +569,78 @@ class Agent:
             elif self.no_progress == 0:
                 nudged = False
 
-    def run(self, task: str) -> RunResult:
+    def run(self, task: str, *, resume: bool = False, message: str = "") -> RunResult:
+        self.started = time.monotonic()
         self.task = task
-        self.log("start", task=task, config=asdict(self.config), checks=self.checks.names(),
+        self.log("resume" if resume else "start", task=task, config=asdict(self.config), checks=self.checks.names(),
                  model=getattr(self.client, "model", None))
         plan, status, summary = None, "error", ""
         try:
-            if self.config.baseline_checks and "tests" in self.checks.checks:
-                self.baseline["tests"] = self.checks.run("tests", self.ws)
-                self.log("check", phase="baseline",
-                         **{**self.baseline["tests"].to_dict(), "output": clip(self.baseline["tests"].output, 2000)})
-            self.messages = [{"role": "system", "content": self._system()},
-                             {"role": "user", "content": self._intro(task)}]
-            stop = None
-            if self.config.plan_first:
-                stop, plan = self._approve()
+            if resume:
+                saved = self.store.load()
+                self.user_messages = saved.get("user_messages", [])
+                if message:
+                    self.user_messages.append(message)
+                self.task, self.plan, self.phase = saved['task'], saved['plan'], saved['phase']
+                self.messages = saved['messages']
+                self.steps, self.edit_count = saved['steps'], saved['edit_count']
+                self.active_skills = saved['active_skills']
+                self.latest_checks = saved['latest_checks']
+                self.last_observation = saved['last_observation']
+                self.elapsed = saved['elapsed']
+                self.finish_attempts = saved['finish_attempts']
+                self.baseline = {k: CheckResult(**v) for k,v in saved['baseline'].items()}
+                self.ws.journal = saved['journal']
+                self.ws._seen.clear()  # require fresh reads after restart
+                uncertain = self.store.uncertain()
+                self.uncertain_calls = {json.dumps([r['tool_name'], r['arguments']], sort_keys=True, default=str)
+                                        for r in uncertain}
+                # Unanswered native calls from a crash are closed, never replayed.
+                for index in range(len(self.messages) - 1, -1, -1):
+                    envelope = self.messages[index]
+                    if envelope.get('tool_calls'):
+                        following = self.messages[index + 1:]
+                        answered = {m.get('tool_call_id') for m in following if m['role'] == 'tool'}
+                        insert_at = index + 1
+                        while insert_at < len(self.messages) and self.messages[insert_at]['role'] == 'tool':
+                            insert_at += 1
+                        for call in envelope['tool_calls']:
+                            if call['id'] not in answered:
+                                self.messages.insert(insert_at, dict(role='tool', tool_call_id=call['id'],
+                                    name=call['function']['name'],
+                                    content='Outcome unknown after interruption; inspect evidence.'))
+                                insert_at += 1
+                        break
+                self._say('Resumed existing private workspace. Previous process handles are not reattached. '
+                          'Read current files before editing. ' + (('User message: ' + message) if message else ''))
+                if uncertain:
+                    self._say('Uncertain operations (do not repeat without inspection): ' +
+                              json.dumps([{'operation_id': r['operation_id'], 'tool': r['tool_name']} for r in uncertain]))
+                stop = None
             else:
-                self._say("Start now: inspect, edit, verify, then call finish.")
+                if self.config.baseline_checks and 'tests' in self.checks.checks:
+                    self.baseline['tests'] = self.checks.run('tests', self.ws)
+                    self.log('check', phase='baseline', **self.baseline['tests'].to_dict())
+                self.messages = [{'role': 'system', 'content': self._system()},
+                                 {'role': 'user', 'content': self._intro(task)}]
+                stop = None
+            if self.phase == 'plan':
+                stop, self.plan = self._approve()
+                if not stop:
+                    self.phase = 'execute'
+            elif not resume:
+                self._say('Start now: inspect, edit, verify, then call finish.')
+            plan = self.plan
             if stop:
-                status, summary = stop, "No approved plan; nothing was changed."
+                status, summary = self.plan_terminal or (stop, "No approved plan; nothing was changed.")
             else:
                 status, summary = self._execute_phase()
         except (ModelError, ContextOverflow) as exc:
             status, summary = "error", f"Model server error: {exc}"
         except Exception as exc:
             status, summary = "error", f"Harness error: {type(exc).__name__}: {exc}"
+        except KeyboardInterrupt:
+            status, summary = 'cancelled', 'Interrupted; session saved for resume.'
         self.dev.stop_all()
         patch = self.ws.patch()
         result = RunResult(status, summary, patch, self.steps, self.ws.changed_files(), plan,
@@ -481,5 +651,6 @@ class Agent:
         (self.evidence_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         (self.evidence_dir / "messages.json").write_text(json.dumps(self.messages, indent=1, default=str))
         (self.evidence_dir / "journal.json").write_text(json.dumps(self.ws.journal, indent=1))
+        self._save_session(status)
         self.log("end", status=status, steps=self.steps, changed=result.changed_files)
         return result

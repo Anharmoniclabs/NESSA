@@ -1,0 +1,62 @@
+"""Real-model acceptance: fix a bug in a private copy and independently check behavior."""
+import argparse
+import json
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from agentharness.agent import Agent, AgentConfig
+from agentharness.checks import CheckRunner, syntax_check
+from agentharness.llm import ChatClient
+from agentharness.profiles import PROFILES
+from agentharness.workspace import Workspace
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--profile', choices=PROFILES, default='laptop-i3-12gb')
+    p.add_argument('--base-url', default='http://127.0.0.1:11434/v1')
+    p.add_argument('--model')
+    p.add_argument('--out', type=Path)
+    args = p.parse_args()
+    profile = PROFILES[args.profile]
+    client = ChatClient(args.base_url, args.model or profile['model'], max_tokens=profile['max_tokens'])
+    if client.model not in client.models():
+        raise SystemExit(f'Model not served: {client.model}')
+    root = args.out or Path.home() / '.agentharness' / 'smoke' / time.strftime('%Y%m%d-%H%M%S')
+    root.mkdir(parents=True, exist_ok=False)
+    with tempfile.TemporaryDirectory() as tmp:
+        source = Path(tmp) / 'source'
+        source.mkdir()
+        original = 'def add(a, b):\n    return a - b\n'
+        (source / 'calc.py').write_text(original)
+        ws = Workspace.create(source, root / 'work')
+        # This check lives in the controller, outside the model-editable snapshot.
+        def behavior(workspace):
+            import subprocess
+            from agentharness.checks import CheckResult
+            script = 'from calc import add; assert add(2,3)==5; assert add(-4,1)==-3; assert add(0,7)==7'
+            r = subprocess.run([sys.executable, '-B', '-c', script], cwd=workspace.repo,
+                               capture_output=True, text=True, timeout=15)
+            return CheckResult('tests', 'passed' if r.returncode == 0 else 'failed',
+                               exit_code=r.returncode, output=r.stdout + r.stderr)
+        config = AgentConfig(require_approval=False, max_steps=16, time_budget=900,
+                             tool_mode='text' if profile['text_tools'] else 'native',
+                             max_context_chars=profile['max_context_chars'],
+                             tool_output_chars=profile['tool_output_chars'], allow_shell=False, allow_extract=False)
+        result = Agent(client, ws, config=config,
+                       checks=CheckRunner({'syntax': syntax_check, 'tests': behavior})).run(
+            'Fix add(a, b) in calc.py: it should return the sum. Inspect the file, propose a plan, '
+            'make the smallest correction, run tests, and finish.')
+        passed = result.status == 'verified' and behavior(ws).status == 'passed' and (source / 'calc.py').read_text() == original
+        report = {'passed': passed, 'model': client.model, 'status': result.status,
+                  'steps': result.steps, 'seconds': result.seconds, 'evidence': result.evidence_dir}
+        (root / 'acceptance.json').write_text(json.dumps(report, indent=2))
+        print(json.dumps(report, indent=2))
+        return 0 if passed else 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

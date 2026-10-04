@@ -70,9 +70,8 @@ class Workspace:
         if work_dir == source or source in work_dir.parents:
             raise ValueError("The work directory must be outside the project folder.")
         ws = cls(work_dir)
-        for d in (ws.repo, ws.baseline):
-            if d.exists():
-                shutil.rmtree(d)
+        if any((work_dir / name).exists() for name in ('repo', 'baseline', 'evidence')):
+            raise FileExistsError(f'Work directory is not empty: {work_dir}; use resume or a new directory')
         ignore = shutil.ignore_patterns(*COPY_IGNORE)
         shutil.copytree(source, ws.repo, symlinks=True, ignore=ignore)
         shutil.copytree(source, ws.baseline, symlinks=True,

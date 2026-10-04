@@ -23,14 +23,17 @@ class Tool:
     kind: str = "read"
     handler: Callable | None = None  # handler(ctx, args) -> str
 
+    cacheable: bool = True
+
     def schema(self) -> dict:
         return {"type": "function", "function": {
             "name": self.name, "description": self.description,
-            "parameters": {"type": "object", "properties": self.params, "required": list(self.required)}}}
+            "parameters": {"type": "object", "properties": self.params, "required": list(self.required), "additionalProperties": False}}}
 
     def validate(self, args) -> dict:
         if not isinstance(args, dict):
             raise ToolError("Arguments must be a JSON object.")
+        args = dict(args)
         missing = [k for k in self.required if k not in args]
         if missing:
             raise ToolError(f"Missing required argument(s): {', '.join(missing)}")
@@ -42,8 +45,11 @@ class Tool:
             ok = {"string": str, "integer": int, "boolean": bool, "array": list, "object": dict}.get(t)
             if ok is int and isinstance(v, str) and v.strip().lstrip("-").isdigit():
                 args[k] = int(v)  # small models often quote numbers
-            elif ok and not isinstance(v, ok):
+            elif ok and (not isinstance(v, ok) or (ok is int and isinstance(v, bool))):
                 raise ToolError(f"Argument {k!r} must be {t}.")
+            if isinstance(args[k], list) and self.params[k].get('items', {}).get('type') == 'string':
+                if not all(isinstance(item, str) for item in args[k]):
+                    raise ToolError(f"Argument {k!r} must contain strings.")
         return args
 
 
@@ -71,7 +77,7 @@ def _extract_table(ctx, args) -> str:
     if args.get("out"):
         dest = ctx.ws.path(args["out"])
         ex.write_rows(rows, dest)
-        note = f"wrote {len(rows)} rows to {ctx.ws.rel(dest)}\n"
+        note = f"ok: wrote {len(rows)} rows to {ctx.ws.rel(dest)}\n"
     else:
         note = ""
     return note + ex.to_markdown(rows[:40]) + (f"\n... {len(rows) - 40} more rows" if len(rows) > 40 else "")
@@ -122,10 +128,13 @@ def build_tools(allow_shell: bool = True, allow_extract: bool = True) -> dict[st
              {"name": S, "argv": {"type": "array", "items": S}, "cwd": S}, ("name", "argv"), "dev",
              handler=lambda c, a: c.dev.start(a["name"], a["argv"], a.get("cwd", "."))),
         Tool("dev_status", "Show status of one or all managed local development processes.",
-             {"name": S}, kind="read", handler=lambda c, a: c.dev.status(a.get("name"))),
+             {"name": S}, kind="read", handler=lambda c, a: c.dev.status(a.get("name")), cacheable=False),
         Tool("dev_logs", "Tail captured logs from a managed development process.",
              {"name": S, "max_bytes": I}, ("name",), "read",
-             handler=lambda c, a: c.dev.logs(a["name"], a.get("max_bytes", 12000))),
+             handler=lambda c, a: c.dev.logs(a["name"], a.get("max_bytes", 12000)), cacheable=False),
+        Tool('dev_wait', 'Wait up to 10 seconds for a named process. Returns pending or exit status and bounded logs.',
+             {'name': S, 'seconds': I}, ('name',), 'read',
+             handler=lambda c,a: c.dev.wait(a['name'], a.get('seconds', 1)), cacheable=False),
         Tool("dev_stop", "Stop a managed local development process.",
              {"name": S}, ("name",), "dev", handler=lambda c, a: c.dev.stop(a["name"])),
     ]
@@ -147,9 +156,15 @@ def build_tools(allow_shell: bool = True, allow_extract: bool = True) -> dict[st
                  {"paths": {"type": "array", "items": S}, "fields": {"type": "array", "items": {"type": "object"}},
                   "tables": {"type": "boolean"}, "key_values": {"type": "boolean"},
                   "out": {**S, "description": "optional output file .csv/.json/.md in the project"}},
-                 ("paths",), "read", handler=_extract_table),
+                 ("paths",), "edit", handler=_extract_table),
         ]
     tools += [
+        Tool('respond', 'Return an informational answer when no files were changed.',
+             {'message': S}, ('message',), 'control'),
+        Tool('ask_user', 'Pause for essential user input. The session can be resumed with an answer.',
+             {'question': S}, ('question',), 'control'),
+        Tool('blocked', 'Report an unmet dependency; do not claim completion.',
+             {'reason': S}, ('reason',), 'control'),
         Tool("propose_plan", "Submit your plan for approval before making changes.",
              {"goal": S, "steps": {"type": "array", "items": S},
               "files": {"type": "array", "items": S}, "checks": {"type": "array", "items": S}},
@@ -157,6 +172,8 @@ def build_tools(allow_shell: bool = True, allow_extract: bool = True) -> dict[st
         Tool("finish", "Stop. Summarise what you changed and how you verified it, or why you could not.",
              {"summary": S}, ("summary",), "control"),
     ]
+    if not allow_shell:
+        tools = [t for t in tools if t.name != 'dev_start']
     return {t.name: t for t in tools}
 
 

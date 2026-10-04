@@ -73,7 +73,9 @@ class ChatClient:
             except urllib.error.HTTPError as exc:
                 detail = exc.read(4000).decode(errors="replace")
                 if exc.code == 400:
-                    raise ContextOverflow(detail) from exc
+                    if any(word in detail.lower() for word in ('context length', 'context window', 'too many tokens', 'context size')):
+                        raise ContextOverflow(detail) from exc
+                    raise ModelError(f'HTTP 400: {detail}') from exc
                 if exc.code in (401, 403, 404):
                     raise ModelError(f"HTTP {exc.code}: {detail}") from exc
                 err = ModelError(f"HTTP {exc.code}: {detail}")
@@ -99,9 +101,21 @@ class ChatClient:
         msg = choices[0].get("message") or {}
         content = msg.get("content") or ""
         raw_calls = msg.get("tool_calls") or []
+        if not isinstance(raw_calls, list) or len(raw_calls) > 64:
+            raise ModelError('Invalid or oversized tool call envelope')
         calls = []
+        normalized = []
+        seen_ids = set()
         for i, c in enumerate(raw_calls):
-            fn = c.get("function") or {}
+            if not isinstance(c, dict) or not isinstance(c.get('function'), dict):
+                raise ModelError('Malformed tool call')
+            fn = c['function']
+            if not isinstance(fn.get('name'), str):
+                raise ModelError('Tool name must be a string')
+            call_id = c.get('id') or f'call_{i}'
+            if not isinstance(call_id, str) or call_id in seen_ids:
+                raise ModelError('Duplicate or invalid tool call ID')
+            seen_ids.add(call_id)
             raw_args = fn.get("arguments")
             if isinstance(raw_args, dict):
                 args = raw_args
@@ -111,11 +125,13 @@ class ChatClient:
                     args = args if isinstance(args, dict) else None
                 except ValueError:
                     args = None
-            calls.append(ToolCall(c.get("id") or f"call_{i}", fn.get("name", ""), args, str(raw_args)))
+            calls.append(ToolCall(call_id, fn['name'], args, str(raw_args)))
+            normalized.append({'id': call_id, 'type': 'function', 'function': {
+                'name': fn['name'], 'arguments': raw_args if isinstance(raw_args, str) else json.dumps(raw_args or {})}})
         native = bool(calls)
         if not calls and content:
             calls = parse_text_tool_calls(content, tool_names)
-        return Reply(content=content, tool_calls=calls, native=native, raw_tool_calls=raw_calls,
+        return Reply(content=content, tool_calls=calls, native=native, raw_tool_calls=normalized,
                      reasoning=msg.get("reasoning_content") or msg.get("reasoning"),
                      prompt_tokens=int((data.get("usage") or {}).get("prompt_tokens") or 0),
                      finish_reason=choices[0].get("finish_reason"))
