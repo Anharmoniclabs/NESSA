@@ -97,10 +97,26 @@ class DevProcessManager:
         path = Path(item.log_path)
         if not path.exists():
             return "(no log yet)"
-        data = path.read_bytes()
-        clipped = data[-max(1000, int(max_bytes)):]
-        prefix = f"[... {len(data) - len(clipped)} earlier bytes omitted ...]\n" if len(clipped) < len(data) else ""
+        limit = max(1, min(12000, int(max_bytes)))
+        with path.open('rb') as f:
+            size = f.seek(0, 2)
+            f.seek(max(0, size - limit))
+            clipped = f.read(limit)
+        prefix = f"[... {size - len(clipped)} earlier bytes omitted ...]\n" if len(clipped) < size else ""
         return prefix + clipped.decode("utf-8", errors="replace")
+
+    def wait(self, name: str, seconds: int = 1) -> str:
+        name = self._name(name)
+        item = self.processes.get(name)
+        if item is None:
+            return f'ERROR: unknown process {name!r}'
+        try:
+            code = item.proc.wait(timeout=max(0, min(10, seconds)))
+            state = f'completed exit={code}' if code == 0 else f'failed exit={code}'
+        except subprocess.TimeoutExpired:
+            state = 'pending'
+        self._write_state()
+        return f'{name}: {state}\n{self.logs(name, 4000)}'
 
     def stop(self, name: str, grace_seconds: float = 2.0) -> str:
         name = self._name(name)

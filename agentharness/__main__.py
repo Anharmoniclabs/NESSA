@@ -19,15 +19,17 @@ from pathlib import Path
 
 from . import extract as ex
 from .agent import Agent, AgentConfig
-from .checks import CheckRunner, detect_checks
+from .checks import CheckResult, CheckRunner, detect_checks
 from .llm import ChatClient, ModelError
 from .memory import LessonStore
 from .reviewer import Reviewer
 from .skills import SkillRegistry
 from .workspace import Workspace
+from .profiles import PROFILES, apply_profile
+from .session import SessionStore
 
 DEFAULT_URL = os.environ.get("AGENT_BASE_URL", "http://127.0.0.1:11434/v1")  # Ollama
-DEFAULT_MODEL = os.environ.get("AGENT_MODEL", "qwen2.5-coder:3b")
+DEFAULT_MODEL = os.environ.get("AGENT_MODEL")
 
 
 def _client(a) -> ChatClient:
@@ -35,7 +37,9 @@ def _client(a) -> ChatClient:
 
 
 def _config(a, **over) -> AgentConfig:
-    return AgentConfig(max_steps=a.max_steps, plan_first=not a.no_plan, allow_shell=not a.no_shell,
+    return AgentConfig(max_context_chars=a.max_context_chars, tool_output_chars=a.tool_output_chars,
+                       compact_at_tokens=6144 if a.profile == "laptop-i3-12gb" else 22000,
+                       max_steps=a.max_steps, plan_first=not a.no_plan, allow_shell=not a.no_shell,
                        tool_mode="text" if a.text_tools else "native",
                        baseline_checks=not a.no_baseline,
                        verify=tuple(v for v in a.verify.split(",") if v),
@@ -61,6 +65,15 @@ def cli_approver(plan: dict) -> tuple[bool, str]:
     return False, ans
 
 
+def print_event(event, data):
+    if event == 'operation_started':
+        print(f"[tool] {data['name']}", flush=True)
+    elif event == 'check':
+        print(f"[check] {data.get('name')}: {data.get('status')}", flush=True)
+    elif event == 'context_compacted':
+        print(f"[context] {data['before']} -> {data['after']} messages", flush=True)
+
+
 def cmd_run(a) -> int:
     project = Path(a.project).resolve()
     task = Path(a.task_file).read_text() if a.task_file else a.task
@@ -82,7 +95,8 @@ def cmd_run(a) -> int:
         reviewer = Reviewer(review_client)
     agent = Agent(_client(a), ws, config=_config(a, require_approval=not a.auto_approve),
                   checks=CheckRunner(checks), approver=None if a.auto_approve else cli_approver,
-                  lessons=lessons, reviewer=reviewer)
+                  lessons=lessons, reviewer=reviewer,
+                  on_event=print_event if a.progress else None)
     print(f"Working copy: {ws.repo}\nChecks: {', '.join(checks)}")
     result = agent.run(task)
     print(f"\nStatus: {result.status}  ({result.steps} steps, {result.seconds}s)")
@@ -106,7 +120,64 @@ def cmd_run(a) -> int:
                 return 1
             subprocess.run(["git", "apply", str(patch_file)], cwd=project, check=True)
             print("Applied. Review with `git diff` in your project.")
-    return 0 if result.status in ("verified", "unverified", "no_change") else 1
+    return 0 if result.status in ("verified", "unverified", "no_change", "answered", "awaiting_input") else 1
+
+
+def cmd_chat(a) -> int:
+    """Terminal conversation backed by the same single agent and private workspace."""
+    project = Path(a.project).resolve()
+    work = Path(a.work or Path.home() / '.agentharness' / 'runs' /
+                f"{project.name}-{time.time_ns()}")
+    ws = Workspace.create(project, work)
+    checks = CheckRunner(detect_checks(ws.repo))
+    cfg = _config(a, require_approval=not a.auto_approve)
+    client = _client(a)
+    task, resume = '', False
+    print(f'NESSA chat | private workspace: {work} | /quit to exit')
+    while True:
+        try:
+            message = input('you> ').strip()
+        except (EOFError, KeyboardInterrupt):
+            print('\nSession retained:', work)
+            return 0
+        if message == '/quit':
+            return 0
+        if not message:
+            continue
+        if not resume:
+            task = message
+        agent = Agent(client, ws, config=cfg, checks=checks,
+                      approver=cli_approver if cfg.require_approval else None,
+                      on_event=print_event)
+        result = agent.run(task, resume=resume, message=message if resume else '')
+        print(f'nessa> {result.summary}\n[{result.status}] Evidence: {result.evidence_dir}')
+        resume = True
+        if result.status in ('budget_exhausted', 'cancelled', 'error'):
+            print('Use the resume command to continue; add explicit extra budgets if needed.')
+            return 1
+
+
+def cmd_resume(a) -> int:
+    work = Path(a.work).resolve()
+    if not (work / 'repo').is_dir() or not (work / 'baseline').is_dir():
+        raise ValueError('Resume requires the existing private repo and baseline directories')
+    saved = SessionStore(work / 'evidence').load()
+    cfg = AgentConfig(**saved['config'])
+    if a.extra_steps < 0 or a.extra_seconds < 0:
+        raise ValueError('Additional budgets must be non-negative')
+    cfg.max_steps += a.extra_steps
+    cfg.time_budget += a.extra_seconds
+    ws = Workspace(work)
+    checks = detect_checks(ws.repo)
+    checks.update(saved.get('check_commands', {}))
+    for name in saved.get('check_names', []):
+        if name not in checks:
+            checks[name] = lambda ws, name=name: CheckResult(name, 'error', output='Check implementation unavailable after restart')
+    agent = Agent(_client(a), ws, config=cfg, checks=CheckRunner(checks),
+                  approver=cli_approver if cfg.require_approval else None)
+    result = agent.run(saved['task'], resume=True, message=a.message)
+    print(f'Status: {result.status}\n{result.summary}\nPatch + evidence: {result.evidence_dir}')
+    return 0 if result.status in ('verified', 'unverified', 'no_change', 'answered', 'awaiting_input') else 1
 
 
 def cmd_batch(a) -> int:
@@ -190,17 +261,21 @@ def main(argv=None) -> int:
 
     def model_args(sp):
         sp.add_argument("--base-url", default=DEFAULT_URL)
+        sp.add_argument("--profile", choices=PROFILES, default="default")
         sp.add_argument("--model", default=DEFAULT_MODEL)
-        sp.add_argument("--max-tokens", type=int, default=4096)
+        sp.add_argument("--max-tokens", type=int, default=None)
         sp.add_argument("--allow-remote", action="store_true", help="permit a non-local model server")
 
     def agent_args(sp):
         model_args(sp)
+        sp.add_argument("--progress", action="store_true", help="show tool/check events while running")
+        sp.add_argument("--max-context-chars", type=int, default=None)
+        sp.add_argument("--tool-output-chars", type=int, default=None)
         sp.add_argument("--max-steps", type=int, default=40)
         sp.add_argument("--no-plan", action="store_true", help="skip the plan/approval phase")
         sp.add_argument("--no-shell", action="store_true", help="disable run_command")
         sp.add_argument("--no-baseline", action="store_true", help="skip running tests before changes")
-        sp.add_argument("--text-tools", action="store_true", help="JSON-in-text tool calls (no native tools)")
+        sp.add_argument("--text-tools", action="store_true", default=None, help="JSON-in-text tool calls (no native tools)")
         sp.add_argument("--verify", default="syntax,tests", help="checks run when the agent finishes")
         sp.add_argument("--continuous-verify", default="syntax",
                         help="cheap checks run automatically after every successful edit")
@@ -225,6 +300,21 @@ def main(argv=None) -> int:
     r.add_argument("--apply", action="store_true", help="offer to git-apply the patch to PROJECT")
     agent_args(r)
     r.set_defaults(fn=cmd_run)
+
+    chat = sub.add_parser('chat', help='terminal conversation with tools and durable follow-ups')
+    chat.add_argument('project')
+    chat.add_argument('--work')
+    chat.add_argument('--auto-approve', action='store_true')
+    agent_args(chat)
+    chat.set_defaults(fn=cmd_chat)
+
+    resume = sub.add_parser('resume', help='continue an existing private workspace without replaying tools')
+    resume.add_argument('work')
+    resume.add_argument('--message', default='', help='answer a clarification or steer the task')
+    resume.add_argument('--extra-steps', type=int, default=0)
+    resume.add_argument('--extra-seconds', type=float, default=0)
+    model_args(resume)
+    resume.set_defaults(fn=cmd_resume)
 
     b = sub.add_parser("batch", help="unattended run over tasks.jsonl")
     b.add_argument("--comp", required=True, help="folder with tasks.jsonl and snapshots/")
@@ -268,6 +358,8 @@ def main(argv=None) -> int:
     d.set_defaults(fn=cmd_doctor)
 
     a = p.parse_args(argv)
+    if hasattr(a, "profile"):
+        apply_profile(a)
     return a.fn(a)
 
 
