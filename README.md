@@ -25,3 +25,14 @@ context digests, live process polling and stricter verification completion.
 bash scripts/setup_i3.sh
 python -m agentharness chat /path/to/project --profile laptop-i3-12gb
 ```
+
+## Install LFM2.5 on the HP i3 / 12 GB laptop
+
+```bash
+bash scripts/install_laptop.sh
+~/.local/bin/nessa chat /path/to/project
+```
+
+[Complete installer, runtime settings, reports and troubleshooting](docs/LFM_LAPTOP_INSTALL.md).
+This is a separate `lfm-i3-12gb` profile; the earlier Qwen 1.5B profile remains available.
+The installer runs real-model acceptance locally before reporting readiness.

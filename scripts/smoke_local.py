@@ -22,10 +22,12 @@ def main():
     p.add_argument('--out', type=Path)
     args = p.parse_args()
     profile = PROFILES[args.profile]
-    client = ChatClient(args.base_url, args.model or profile['model'], max_tokens=profile['max_tokens'])
+    client = ChatClient(args.base_url, args.model or profile['model'], max_tokens=profile['max_tokens'],
+                        temperature=profile.get('temperature', 0.0),
+                        reasoning_effort=profile.get('reasoning_effort'))
     if client.model not in client.models():
         raise SystemExit(f'Model not served: {client.model}')
-    root = args.out or Path.home() / '.agentharness' / 'smoke' / time.strftime('%Y%m%d-%H%M%S')
+    root = args.out or Path.home() / '.agentharness' / 'smoke' / str(time.time_ns())
     root.mkdir(parents=True, exist_ok=False)
     with tempfile.TemporaryDirectory() as tmp:
         source = Path(tmp) / 'source'
@@ -52,7 +54,8 @@ def main():
             'make the smallest correction, run tests, and finish.')
         passed = result.status == 'verified' and behavior(ws).status == 'passed' and (source / 'calc.py').read_text() == original
         report = {'passed': passed, 'model': client.model, 'status': result.status,
-                  'steps': result.steps, 'seconds': result.seconds, 'evidence': result.evidence_dir}
+                  'steps': result.steps, 'seconds': result.seconds, 'evidence': result.evidence_dir,
+                  'profile': args.profile, 'backend': args.base_url}
         (root / 'acceptance.json').write_text(json.dumps(report, indent=2))
         print(json.dumps(report, indent=2))
         return 0 if passed else 1

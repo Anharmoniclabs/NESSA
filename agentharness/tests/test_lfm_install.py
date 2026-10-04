@@ -1,0 +1,128 @@
+"""Native LFM routing and isolated installation/readiness behavior."""
+import argparse
+import importlib.util
+import io
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from unittest.mock import patch
+
+from agentharness.llm import ChatClient
+from agentharness.profiles import apply_profile
+from agentharness.tests.test_http_cli import FakeServer
+from agentharness.__main__ import main
+
+ROOT = Path(__file__).resolve().parents[2]
+spec = importlib.util.spec_from_file_location('installer', ROOT / 'scripts/install_laptop.py')
+installer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(installer)
+
+
+class LFM(unittest.TestCase):
+    def test_profile_uses_native_tools_without_overriding_explicit_model(self):
+        args = apply_profile(argparse.Namespace(profile='lfm-i3-12gb', model='custom'))
+        self.assertEqual(args.model, 'custom')
+        self.assertFalse(args.text_tools)
+        self.assertEqual(args.reasoning_effort, 'none')
+        self.assertEqual(args.temperature, 0.2)
+
+    def test_lfm_http_loop_passes_native_tool_results(self):
+        server = FakeServer('native')
+        self.addCleanup(server.close)
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 'source'
+            source.mkdir()
+            (source / 'calc.py').write_text('def add(a, b):\n    return a - b\n')
+            with redirect_stdout(io.StringIO()):
+                code = main(['run', str(source), 'Fix add', '--profile', 'lfm-i3-12gb',
+                             '--model', 'fake-model', '--base-url', server.url, '--auto-approve',
+                             '--work', str(Path(tmp) / 'work')])
+            self.assertEqual(code, 0)
+            self.assertIn('tools', server.requests[0])
+            for request in server.requests:
+                self.assertEqual(request['reasoning_effort'], 'none')
+                self.assertEqual(request['max_tokens'], 1536)
+                self.assertEqual(request['temperature'], 0.2)
+                payload = len(json.dumps(request['messages'], ensure_ascii=False)) + len(json.dumps(request['tools']))
+                self.assertLessEqual(payload, 18000)
+            self.assertTrue(any(m['role'] == 'tool' for m in server.requests[-1]['messages']))
+
+    def test_default_client_does_not_force_backend_reasoning_setting(self):
+        client = ChatClient('http://localhost:11434/v1', 'm')
+        with patch.object(client, '_request', return_value={'choices': [{'message': {'content': 'ok'}}]}) as request:
+            client.chat([])
+        self.assertNotIn('reasoning_effort', request.call_args.args[1])
+
+    def test_unit_limits_and_path_escaping(self):
+        unit = installer.unit_text(Path('/tmp/user %/bin/ollama'), Path('/tmp/user %/models'))
+        self.assertIn('user %%', unit)
+        self.assertIn('OLLAMA_HOST=127.0.0.1:11435', unit)
+        self.assertIn('OLLAMA_NUM_PARALLEL=1', unit)
+        self.assertIn('OLLAMA_MAX_LOADED_MODELS=1', unit)
+
+    def test_launcher_shell_syntax_with_spaces_and_quotes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / 'nessa'
+            script.write_text(installer.launcher_text(Path("/tmp/my app's directory"), '/usr/bin/python3'))
+            subprocess.run(['bash', '-n', str(script)], check=True)
+
+    def _install(self, skip=False, fail=False):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            root = home / '.local/share/nessa'
+            binary = root / 'runtime/bin/ollama'
+            binary.parent.mkdir(parents=True)
+            binary.write_text('fake binary')
+            commands = []
+            def run(argv, **kw):
+                argv = list(map(str, argv))
+                commands.append(argv)
+                if any('smoke_local.py' in x for x in argv):
+                    if fail:
+                        raise subprocess.CalledProcessError(1, argv)
+                    out = Path(argv[argv.index('--out') + 1])
+                    out.mkdir(parents=True)
+                    (out / 'acceptance.json').write_text('{"passed": true}')
+            with patch.object(Path, 'home', return_value=home), \
+                 patch.object(installer.os, 'geteuid', return_value=1000), \
+                 patch.object(installer.platform, 'system', return_value='Linux'), \
+                 patch.object(installer.platform, 'machine', return_value='x86_64'), \
+                 patch.object(installer.shutil, 'which', return_value='/bin/fake'), \
+                 patch.object(installer.shutil, 'disk_usage', return_value=argparse.Namespace(free=30*1024**3)), \
+                 patch.object(installer, 'run', side_effect=run), \
+                 patch.object(installer, 'get_json', return_value={'version': 'test'}), \
+                 patch.object(installer.socket.socket, 'connect_ex', return_value=1), \
+                 redirect_stdout(io.StringIO()):
+                code = installer.install(skip_acceptance=skip)
+            report = json.loads((root / 'installation.json').read_text())
+            self.assertTrue((home / '.local/bin/nessa').is_file())
+            self.assertTrue((root / 'app/agentharness/llm.py').is_file())
+            return code, report, commands
+
+    def test_install_ready_only_after_acceptance(self):
+        code, report, commands = self._install()
+        self.assertEqual(code, 0)
+        self.assertEqual(report['status'], 'ready')
+        self.assertTrue(report['acceptance_passed'])
+        self.assertTrue(any('pull' in command and installer.MODEL in command for command in commands))
+
+    def test_failed_acceptance_is_not_ready(self):
+        code, report, _ = self._install(fail=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(report['status'], 'failed')
+        self.assertFalse(report['acceptance_passed'])
+
+    def test_skipped_acceptance_is_unverified(self):
+        code, report, commands = self._install(skip=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(report['status'], 'installed_unverified')
+        self.assertFalse(any(any('smoke_local.py' in x for x in command) for command in commands))
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -33,12 +33,14 @@ DEFAULT_MODEL = os.environ.get("AGENT_MODEL")
 
 
 def _client(a) -> ChatClient:
-    return ChatClient(a.base_url, a.model, max_tokens=a.max_tokens, allow_remote=a.allow_remote)
+    return ChatClient(a.base_url, a.model, max_tokens=a.max_tokens, allow_remote=a.allow_remote,
+                      temperature=a.temperature if a.temperature is not None else 0.0,
+                      reasoning_effort=a.reasoning_effort)
 
 
 def _config(a, **over) -> AgentConfig:
     return AgentConfig(max_context_chars=a.max_context_chars, tool_output_chars=a.tool_output_chars,
-                       compact_at_tokens=6144 if a.profile == "laptop-i3-12gb" else 22000,
+                       compact_at_tokens=6144 if a.profile in ("laptop-i3-12gb", "lfm-i3-12gb") else 22000,
                        max_steps=a.max_steps, plan_first=not a.no_plan, allow_shell=not a.no_shell,
                        tool_mode="text" if a.text_tools else "native",
                        baseline_checks=not a.no_baseline,
@@ -263,6 +265,8 @@ def main(argv=None) -> int:
         sp.add_argument("--base-url", default=DEFAULT_URL)
         sp.add_argument("--profile", choices=PROFILES, default="default")
         sp.add_argument("--model", default=DEFAULT_MODEL)
+        sp.add_argument("--temperature", type=float, default=None)
+        sp.add_argument("--reasoning-effort", choices=("none", "low", "medium", "high"), default=None)
         sp.add_argument("--max-tokens", type=int, default=None)
         sp.add_argument("--allow-remote", action="store_true", help="permit a non-local model server")
 

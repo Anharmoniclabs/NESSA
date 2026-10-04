@@ -47,7 +47,7 @@ class Reply:
 class ChatClient:
     def __init__(self, base_url: str, model: str, *, temperature: float = 0.0,
                  max_tokens: int = 4096, timeout: float = 900, retries: int = 3,
-                 allow_remote: bool = False, api_key: str = "local"):
+                 allow_remote: bool = False, api_key: str = "local", reasoning_effort: str | None = None):
         host = urllib.parse.urlparse(base_url).hostname
         if host not in LOCAL_HOSTS and not allow_remote:
             raise ValueError(f"Refusing non-local model server {host!r}; pass allow_remote=True to override.")
@@ -58,6 +58,7 @@ class ChatClient:
         self.timeout = timeout
         self.retries = retries
         self.api_key = api_key
+        self.reasoning_effort = reasoning_effort
         # Local traffic must not go through an HTTP proxy configured for the internet.
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -91,6 +92,8 @@ class ChatClient:
              tool_names: set[str] | None = None) -> Reply:
         body = {"model": self.model, "messages": messages,
                 "temperature": self.temperature, "max_tokens": self.max_tokens}
+        if self.reasoning_effort is not None:
+            body["reasoning_effort"] = self.reasoning_effort
         if tools:
             body["tools"] = tools
             body["tool_choice"] = "auto"
