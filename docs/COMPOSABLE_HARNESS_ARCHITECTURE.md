@@ -1,5 +1,9 @@
 # Composable Local Agent Harness Architecture
 
+This document includes both implemented layers and future design targets. See the
+[2026-10-04 wiring audit](HARNESS_WIRING_AUDIT.md) for the current capability map
+and executable conformance evidence.
+
 ## Product equation
 
 ```text

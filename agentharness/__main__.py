@@ -71,7 +71,14 @@ def print_event(event, data):
     if event == 'operation_started':
         print(f"[tool] {data['name']}", flush=True)
     elif event == 'check':
-        print(f"[check] {data.get('name')}: {data.get('status')}", flush=True)
+        if data.get('phase') == 'baseline':
+            print(f"[baseline] {data.get('name')}: {data.get('status')} (before changes)", flush=True)
+        else:
+            print(f"[check] {data.get('name')}: {data.get('status')}", flush=True)
+    elif event == 'model_started':
+        print('[model] Waiting for local model… (Ctrl+C to cancel)', flush=True)
+    elif event == 'model':
+        print(f"[model] Reply received in {data['seconds']:.1f}s", flush=True)
     elif event == 'context_compacted':
         print(f"[context] {data['before']} -> {data['after']} messages", flush=True)
 
@@ -132,8 +139,10 @@ def cmd_chat(a) -> int:
                 f"{project.name}-{time.time_ns()}")
     ws = Workspace.create(project, work)
     checks = CheckRunner(detect_checks(ws.repo))
-    cfg = _config(a, require_approval=not a.auto_approve)
+    cfg = _config(a, require_approval=not a.auto_approve, conversational=True)
     client = _client(a)
+    reviewer = Reviewer(ChatClient(a.review_base_url or a.base_url, a.review_model,
+                        max_tokens=min(a.max_tokens, 4096), allow_remote=a.allow_remote)) if a.review_model else None
     task, resume = '', False
     print(f'NESSA chat | private workspace: {work} | /quit to exit')
     while True:
@@ -150,13 +159,15 @@ def cmd_chat(a) -> int:
             task = message
         agent = Agent(client, ws, config=cfg, checks=checks,
                       approver=cli_approver if cfg.require_approval else None,
-                      on_event=print_event)
+                      on_event=print_event, reviewer=reviewer,
+                      lessons=LessonStore().relevant(str(project), message))
         result = agent.run(task, resume=resume, message=message if resume else '')
-        print(f'nessa> {result.summary}\n[{result.status}] Evidence: {result.evidence_dir}')
+        print(f'nessa> {result.summary}', flush=True)
+        if result.status not in ('answered', 'awaiting_input'):
+            print(f'[{result.status}] Evidence: {result.evidence_dir}', flush=True)
         resume = True
         if result.status in ('budget_exhausted', 'cancelled', 'error'):
-            print('Use the resume command to continue; add explicit extra budgets if needed.')
-            return 1
+            print('Session saved. Send another message to continue, or /quit to exit.', flush=True)
 
 
 def cmd_resume(a) -> int:

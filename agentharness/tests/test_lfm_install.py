@@ -24,10 +24,45 @@ spec.loader.exec_module(installer)
 
 
 class LFM(unittest.TestCase):
-    def test_profile_uses_native_tools_without_overriding_explicit_model(self):
+    def test_lfm_sends_history_without_assistant_prefill(self):
+        messages = [{'role': 'user', 'content': 'My name is alabs.'},
+                    {'role': 'assistant', 'content': 'Hello, alabs!'},
+                    {'role': 'user', 'content': 'What is my name?'}]
+        for model, effort, prefill in [('nessa-lfm:latest', 'none', False),
+                                       ('lfm2.5:8b-a1b-q4_K_M', 'none', False),
+                                       ('nessa-lfm:latest', None, False),
+                                       ('other-model', 'none', False)]:
+            with self.subTest(model=model, effort=effort):
+                client = ChatClient('http://localhost:11435/v1', model, reasoning_effort=effort)
+                with patch.object(client, '_request', return_value={
+                        'choices': [{'message': {'content': 'alabs'}}]}) as request:
+                    self.assertEqual(client.chat(messages).content, 'alabs')
+                sent = request.call_args.args[1]['messages']
+                self.assertEqual(sent[:3], messages)
+                self.assertEqual(len(messages), 3)
+                self.assertEqual(len(sent), 4 if prefill else 3)
+                if prefill:
+                    self.assertEqual(sent[-1], {'role': 'assistant', 'content': '<think></think>'})
+
+    def test_inline_reasoning_keeps_native_calls_outside_renderer_cleanup(self):
+        client = ChatClient('http://127.0.0.1:11435/v1', 'nessa-lfm:latest')
+        call = {'id': 'read', 'type': 'function', 'function': {
+            'name': 'read_file', 'arguments': '{"path":"calc.py"}'}}
+        response = {'choices': [{'message': {
+            'content': '<think>Inspect the source first.</think>\n',
+            'tool_calls': [call]}}]}
+        with patch.object(client, '_request', return_value=response):
+            reply = client.chat([{'role': 'user', 'content': 'Fix add'}])
+        self.assertTrue(reply.native)
+        self.assertEqual(reply.content, '')
+        self.assertEqual(reply.reasoning, 'Inspect the source first.')
+        self.assertEqual(reply.raw_tool_calls, [call])
+        self.assertEqual(reply.tool_calls[0].arguments, {'path': 'calc.py'})
+
+    def test_profile_uses_json_tools_without_overriding_explicit_model(self):
         args = apply_profile(argparse.Namespace(profile='lfm-i3-12gb', model='custom'))
         self.assertEqual(args.model, 'custom')
-        self.assertFalse(args.text_tools)
+        self.assertTrue(args.text_tools)
         self.assertEqual(args.reasoning_effort, 'none')
         self.assertEqual(args.temperature, 0.2)
 
@@ -43,12 +78,13 @@ class LFM(unittest.TestCase):
                              '--model', 'fake-model', '--base-url', server.url, '--auto-approve',
                              '--work', str(Path(tmp) / 'work')])
             self.assertEqual(code, 0)
-            self.assertIn('tools', server.requests[0])
+            self.assertNotIn('tools', server.requests[0])
+            self.assertIn('exactly one JSON object', server.requests[0]['messages'][0]['content'])
             for request in server.requests:
                 self.assertEqual(request['reasoning_effort'], 'none')
-                self.assertEqual(request['max_tokens'], 1536)
+                self.assertEqual(request['max_tokens'], 3072)
                 self.assertEqual(request['temperature'], 0.2)
-                payload = len(json.dumps(request['messages'], ensure_ascii=False)) + len(json.dumps(request['tools']))
+                payload = len(json.dumps(request['messages'], ensure_ascii=False)) + len(json.dumps(request.get('tools', [])))
                 self.assertLessEqual(payload, 18000)
             self.assertTrue(any(m['role'] == 'tool' for m in server.requests[-1]['messages']))
 

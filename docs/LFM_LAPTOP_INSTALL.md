@@ -48,6 +48,16 @@ and model digests returned by Ollama are recorded. It is not a pinned runtime re
 Replace the project path with the folder you want NESSA to work on. It edits a
 private copy and produces a patch. It asks for plan approval by default.
 The interface is terminal chat, with tool/check progress, not a graphical UI.
+Normal messages are answered as conversation, with follow-up context retained. Project
+inspection and changes are driven by your requests. Baseline tests run after you approve
+a work plan; a greeting does not start tests or create a repair plan. Model requests show
+a waiting status and their elapsed time. Ctrl+C cancels the current task and returns to chat.
+
+To verify conversation, remembered context and a coding request with the real model:
+
+```bash
+~/.local/bin/nessa smoke --conversation
+```
 
 Other commands:
 
@@ -69,7 +79,13 @@ need network access or project-specific dependencies.
 
 - LFM2.5 8B-A1B Q4_K_M; all quantized weights still occupy memory.
 - CPU execution, initially two threads, one loaded model and one parallel request.
-- 8192-token server context, maximum 1536 generated tokens per request.
+- 8192-token server context; the coding client requests up to 3072 generated tokens.
+- JSON text tool calls for the LFM coding profile. The adapter accepts explicit
+  `name`/`arguments` calls and `commands`/`tool_name` envelopes, while retaining
+  tool allowlists, argument validation and verification gates. It does not repair
+  malformed source strings or execute examples inside unfinished reasoning.
+- No artificial assistant reasoning prefill: the local LFM runtime can otherwise
+  return a whitespace-only answer. Native tool support remains available to other profiles.
 - Native OpenAI-compatible tool calls through Ollama's model-specific parser.
 - NESSA `lfm-i3-12gb` profile: temperature 0.2, `reasoning_effort=none`, bounded
   observations, and an 18,000-character message/schema budget.

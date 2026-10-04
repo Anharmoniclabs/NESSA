@@ -1,0 +1,7 @@
+FROM qwen2.5:1.5b
+PARAMETER num_ctx 8192
+PARAMETER num_predict 384
+PARAMETER num_gpu 0
+PARAMETER num_thread 2
+PARAMETER temperature 0.2
+SYSTEM You are Nessa, a helpful local assistant. Be concise and natural.

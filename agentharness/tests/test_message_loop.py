@@ -164,21 +164,167 @@ class MessageLoop(Base):
         self.assertEqual(json.loads((work / 'evidence' / 'session.json').read_text())['status'], 'verified')
 
 
+    def test_terminal_conversation_uses_model_without_starting_checks(self):
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+        from agentharness.__main__ import main
+        client = ScriptedClient(['Hello! What is on your mind?', 'Four.', 'You asked about addition.'])
+        with patch('agentharness.__main__._client', return_value=client), \
+             patch.object(CheckRunner, 'run') as checks, \
+             patch('builtins.input', side_effect=['hey  ', 'What is two plus two?', 'What did I ask?', '/quit']), \
+             redirect_stdout(io.StringIO()) as output:
+            code = main(['chat', str(self.proj), '--work', str(self.tmp / 'greetings')])
+        self.assertEqual(code, 0)
+        checks.assert_not_called()
+        self.assertEqual(len(client.seen), 3)
+        self.assertIn('Four.', output.getvalue())
+        self.assertIn('What is two plus two?', json.dumps(client.seen[-1][0]))
+        self.assertNotIn('tests: failed', output.getvalue())
+
     def test_terminal_chat_preserves_followup(self):
         import io
         from contextlib import redirect_stdout
         from unittest.mock import patch
         from agentharness.__main__ import main
-        client = ScriptedClient([[('ask_user', {'question': 'Which file?'})],
+        client = ScriptedClient(['Hello!', [('start_work', {'request': 'Explain arithmetic'})],
+                                 [('ask_user', {'question': 'Which file?'})],
                                  [('respond', {'message': 'calc.py subtracts'})]])
         with patch('agentharness.__main__._client', return_value=client), \
-             patch('builtins.input', side_effect=['Explain arithmetic', 'calc.py', '/quit']), \
+             patch('builtins.input', side_effect=['hey', 'Explain arithmetic', 'calc.py', '/quit']), \
              redirect_stdout(io.StringIO()) as output:
             code = main(['chat', str(self.proj), '--auto-approve', '--no-plan',
                          '--work', str(self.tmp / 'chat')])
         self.assertEqual(code, 0)
         self.assertIn('calc.py subtracts', output.getvalue())
         self.assertIn('User message: calc.py', json.dumps(client.seen[-1][0]))
+        self.assertIn('Explain arithmetic', json.dumps(client.seen[-1][0]))
+
+    def test_greeting_with_task_still_reaches_agent(self):
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+        from agentharness.__main__ import main
+        client = ScriptedClient([[('start_work', {'request': 'hey, explain calc.py'})],
+                                 [('respond', {'message': 'The function subtracts.'})]])
+        with patch('agentharness.__main__._client', return_value=client), \
+             patch('builtins.input', side_effect=['hey, explain calc.py', '/quit']), \
+             redirect_stdout(io.StringIO()) as output:
+            main(['chat', str(self.proj), '--no-plan', '--auto-approve',
+                  '--work', str(self.tmp / 'greeting-task')])
+        self.assertEqual(len(client.seen), 2)
+        self.assertIn('hey, explain calc.py', json.dumps(client.seen[0][0]))
+        self.assertIn('[model] Waiting for local model', output.getvalue())
+        self.assertNotIn('[baseline]', output.getvalue())
+
+    def test_conversation_then_coding_requires_approval_before_baseline(self):
+        from unittest.mock import Mock
+        client = ScriptedClient(['Hi!', [('start_work', {'request': 'Fix add to return the sum'})],
+            [('read_file', {'path': 'calc.py'})],
+            [('propose_plan', {'goal': 'Fix add', 'steps': ['Replace subtraction with addition']})],
+            [('replace_in_file', {'path': 'calc.py', 'old': 'a - b', 'new': 'a + b'})],
+            [('finish', {'summary': 'Fixed add'})], 'You are welcome!'])
+        checks = CheckRunner({'syntax': syntax_check, 'tests': UNITTEST})
+        checks.run = Mock(wraps=checks.run)
+        def approve(plan):
+            checks.run.assert_not_called()
+            return True, ''
+        cfg = AgentConfig(conversational=True)
+        first = Agent(client, self.ws, config=cfg, checks=checks, approver=approve)
+        self.assertEqual(first.run('hey').status, 'answered')
+        checks.run.assert_not_called()
+        second = Agent(client, self.ws, config=cfg, checks=checks, approver=approve)
+        result = second.run('', resume=True, message='Fix add to return the sum')
+        self.assertEqual(result.status, 'verified', result.summary)
+        self.assertIn('failed', result.checks['baseline']['tests'])
+        self.assertIn('passed', result.checks['final']['tests'])
+        checks.run.reset_mock()
+        third = Agent(client, self.ws, config=cfg, checks=checks, approver=approve)
+        self.assertEqual(third.run('', resume=True, message='Thanks!').status, 'answered')
+        checks.run.assert_not_called()
+        self.assertEqual((self.proj / 'calc.py').read_text(), BUGGY)
+
+    def test_conversation_rejected_plan_runs_no_checks_or_edits(self):
+        from unittest.mock import Mock
+        client = ScriptedClient([[('start_work', {'request': 'Fix add'})],
+                                [('propose_plan', {'goal': 'Fix', 'steps': ['Edit calc.py']})]])
+        checks = CheckRunner({'tests': UNITTEST})
+        checks.run = Mock(wraps=checks.run)
+        agent = Agent(client, self.ws, config=AgentConfig(conversational=True),
+                      checks=checks, approver=lambda plan: (False, ''))
+        self.assertEqual(agent.run('Fix add').status, 'rejected')
+        checks.run.assert_not_called()
+        self.assertEqual((self.ws.repo / 'calc.py').read_text(), BUGGY)
+
+    def test_terminal_chat_recovers_after_model_error(self):
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+        from agentharness.__main__ import main
+        class RecoveringClient(ScriptedClient):
+            def chat(self, messages, tools=None, tool_names=None):
+                if not hasattr(self, 'failed'):
+                    self.failed = True
+                    raise ModelError('temporary connection error')
+                return super().chat(messages, tools, tool_names)
+        client = RecoveringClient(['I am here.'])
+        with patch('agentharness.__main__._client', return_value=client), \
+             patch('builtins.input', side_effect=['hello', 'try again', '/quit']), \
+             redirect_stdout(io.StringIO()) as output:
+            code = main(['chat', str(self.proj), '--work', str(self.tmp / 'recovery')])
+        self.assertEqual(code, 0)
+        self.assertIn('temporary connection error', output.getvalue())
+        self.assertIn('nessa> I am here.', output.getvalue())
+
+    def test_new_work_in_same_chat_needs_new_plan_approval(self):
+        client = ScriptedClient([
+            [('start_work', {'request': 'Fix add'})],
+            [('read_file', {'path': 'calc.py'})],
+            [('propose_plan', {'goal': 'Fix add', 'steps': ['Use addition']})],
+            [('replace_in_file', {'path': 'calc.py', 'old': 'a - b', 'new': 'a + b'})],
+            [('finish', {'summary': 'Fixed'})],
+            [('start_work', {'request': 'Now replace add'})],
+            [('propose_plan', {'goal': 'Replace add', 'steps': ['Change implementation']})],
+        ])
+        approvals = []
+        def approve(plan):
+            approvals.append(plan)
+            return len(approvals) == 1, ''
+        cfg = AgentConfig(conversational=True)
+        checks = CheckRunner({'syntax': syntax_check, 'tests': UNITTEST})
+        first = Agent(client, self.ws, config=cfg, checks=checks, approver=approve)
+        self.assertEqual(first.run('Fix add').status, 'verified')
+        second = Agent(client, self.ws, config=cfg, checks=checks, approver=approve)
+        self.assertEqual(second.run('', resume=True, message='Now replace add').status, 'rejected')
+        self.assertEqual(len(approvals), 2)
+        self.assertIn('return a + b', (self.ws.repo / 'calc.py').read_text())
+
+    def test_chat_cannot_call_edit_tools_before_entering_workflow(self):
+        client = ScriptedClient([[('write_file', {'path': 'oops.txt', 'content': 'bad'})], 'Hello.'])
+        agent = Agent(client, self.ws, config=AgentConfig(conversational=True, require_approval=False))
+        self.assertEqual(agent.run('hello').status, 'answered')
+        self.assertFalse((self.ws.repo / 'oops.txt').exists())
+        self.assertIn('start_work', client.seen[0][1])
+        self.assertIn('weather', client.seen[0][1])
+        self.assertNotIn('write_file', client.seen[0][1])
+        self.assertIn('run_command', client.seen[0][1])  # separately gated by exact-command approval
+        self.assertIn('ERROR', json.dumps(client.seen[-1][0]))
+
+    def test_start_work_requires_a_nonempty_request(self):
+        client = ScriptedClient([[('start_work', {'request': ' '})], 'What would you like to do?'])
+        agent = Agent(client, self.ws, config=AgentConfig(conversational=True, require_approval=False))
+        self.assertEqual(agent.run('hello').status, 'answered')
+        self.assertIsNone(agent.plan)
+        self.assertFalse(agent.baseline)
+
+    def test_start_work_does_not_replace_user_request_with_model_summary(self):
+        client = ScriptedClient([[('start_work', {'request': 'Inspect the file'})],
+                                 [('respond', {'message': 'Done inspecting.'})]])
+        agent = Agent(client, self.ws, config=AgentConfig(conversational=True, require_approval=False))
+        agent.run('Fix add and verify its behavior')
+        self.assertEqual(agent.task, 'Fix add and verify its behavior')
+        self.assertIn('Task:\nFix add and verify its behavior',
+                      '\n'.join(m.get('content', '') for m in client.seen[-1][0]))
 
     def test_overbudget_calls_are_answered_without_execution(self):
         agent = self.agent([[('write_file', {'path': f'{i}.txt', 'content': 'x'}) for i in range(4)],

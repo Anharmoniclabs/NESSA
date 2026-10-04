@@ -73,6 +73,19 @@ class Base(unittest.TestCase):
 
 
 class AgentFlow(Base):
+    def test_described_actions_do_not_execute_or_verify(self):
+        result = self.agent([
+            [("read_file", {"path": "calc.py"})],
+            [("propose_plan", {"goal": "fix add", "steps": ["use +"], "files": ["calc.py"]})],
+            json.dumps({"steps": [{"action": "replace_in_file", "path": "calc.py",
+                                   "old": "a - b", "new": "a + b"}],
+                        "summary": "File edited and tests passed."}),
+        ]).run("Fix add")
+        self.assertEqual(result.status, "stalled")
+        self.assertEqual(result.changed_files, [])
+        self.assertEqual((self.ws.repo / "calc.py").read_text(), BUGGY)
+        self.assertEqual((self.proj / "calc.py").read_text(), BUGGY)
+
     def test_plan_edit_verify(self):
         result = self.agent([
             [("search", {"pattern": "def add"})],

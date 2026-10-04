@@ -20,6 +20,7 @@ def main():
     p.add_argument('--base-url', default='http://127.0.0.1:11434/v1')
     p.add_argument('--model')
     p.add_argument('--out', type=Path)
+    p.add_argument('--conversation', action='store_true', help='verify chat, memory and coding in one conversation')
     args = p.parse_args()
     profile = PROFILES[args.profile]
     client = ChatClient(args.base_url, args.model or profile['model'], max_tokens=profile['max_tokens'],
@@ -44,18 +45,37 @@ def main():
                                capture_output=True, text=True, timeout=15)
             return CheckResult('tests', 'passed' if r.returncode == 0 else 'failed',
                                exit_code=r.returncode, output=r.stdout + r.stderr)
-        config = AgentConfig(require_approval=False, max_steps=16, time_budget=900,
+        config = AgentConfig(require_approval=False, conversational=args.conversation, max_steps=16, time_budget=900,
                              tool_mode='text' if profile['text_tools'] else 'native',
                              max_context_chars=profile['max_context_chars'],
                              tool_output_chars=profile['tool_output_chars'], allow_shell=False, allow_extract=False)
-        result = Agent(client, ws, config=config,
-                       checks=CheckRunner({'syntax': syntax_check, 'tests': behavior})).run(
-            'Fix add(a, b) in calc.py: it should return the sum. Inspect the file, propose a plan, '
-            'make the smallest correction, run tests, and finish.')
-        passed = result.status == 'verified' and behavior(ws).status == 'passed' and (source / 'calc.py').read_text() == original
+        checks = CheckRunner({'syntax': syntax_check, 'tests': behavior})
+        conversation = []
+        if args.conversation:
+            for index, message in enumerate(('Hi, my name is alabs. Say hello briefly.',
+                                             'What is my name? Answer only the name.')):
+                turn = Agent(client, ws, config=config, checks=checks).run(
+                    message, resume=index > 0, message=message if index else '')
+                conversation.append({'message': message, 'status': turn.status, 'reply': turn.summary,
+                                     'seconds': turn.seconds, 'checks': turn.checks,
+                                     'changed_files': turn.changed_files})
+                if turn.status != 'answered' or turn.changed_files or any(turn.checks.values()):
+                    break
+        conversation_passed = not args.conversation or (
+            len(conversation) == 2 and all(t['status'] == 'answered' and not t['changed_files']
+                                          and not any(t['checks'].values()) for t in conversation)
+            and 'alabs' in conversation[-1]['reply'].lower())
+        task = ('Fix add(a, b) in calc.py: it should return the sum. Inspect the file, propose a plan, '
+                'make the smallest correction, run tests, and finish.')
+        result = Agent(client, ws, config=config, checks=checks).run(
+            task, resume=args.conversation, message=task if args.conversation else '')
+        passed = conversation_passed and result.status == 'verified' and behavior(ws).status == 'passed' and (source / 'calc.py').read_text() == original
         report = {'passed': passed, 'model': client.model, 'status': result.status,
                   'steps': result.steps, 'seconds': result.seconds, 'evidence': result.evidence_dir,
                   'profile': args.profile, 'backend': args.base_url}
+        if args.conversation:
+            report['conversation'] = conversation
+            report['conversation_passed'] = conversation_passed
         (root / 'acceptance.json').write_text(json.dumps(report, indent=2))
         print(json.dumps(report, indent=2))
         return 0 if passed else 1

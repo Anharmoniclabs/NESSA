@@ -3,6 +3,9 @@
 This is NESSA's own implementation of a model-driven feedback loop. It does not
 reproduce or claim access to another product's private source or infrastructure.
 
+Current desktop routing, repaired wiring gaps and remaining capabilities are recorded in
+[the harness wiring audit](HARNESS_WIRING_AUDIT.md).
+
 ## Implemented route
 
 ```mermaid
@@ -126,7 +129,8 @@ disk are not rotated; operators should keep dev sessions bounded.
 | Reattaching dev processes after parent restart | Not implemented; inspect surviving OS processes manually |
 | MCP, browser automation, external app/media connectors | Not implemented in this change; no fictitious tools advertised |
 | Autonomous worker swarm | Not added; repository contract requires one parent loop |
-| OpenTelemetry exporter and graphical chat UI | Not implemented; JSON events and terminal chat are available |
+| Native desktop chat UI | Implemented in `gui.py` / `desktop.py`, including fast-chat handoff |
+| OpenTelemetry exporter | Not implemented; JSON events are available |
 | Training or modifying model weights | Not performed |
 
 `--no-shell` disables generic command and dev-process launch tools. Registered
