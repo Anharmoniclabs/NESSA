@@ -1112,70 +1112,60 @@ class Agent:
             self._say('Uncertain operations (do not repeat without inspection): ' +
                       json.dumps([{'operation_id': r['operation_id'], 'tool': r['tool_name']} for r in uncertain]))
 
-    def run(self, task: str, *, resume: bool = False, message: str = "") -> RunResult:
-        self.started = time.monotonic()
-        self.task = task
-        self.log("resume" if resume else "start", task=task, config=asdict(self.config), checks=self.checks.names(),
-                 model=getattr(self.client, "model", None), project_config=self.project_config.path,
-                 config_errors=self.project_config.errors, reattached=self.dev.reattached)
-        plan, status, summary = None, "error", ""
-        try:
-            if resume:
-                self._restore_session(message)
-                stop = None
-            else:
-                if self.config.conversational:
-                    self.user_messages = [task]
-                if not self.config.conversational and self.config.baseline_checks and 'tests' in self.checks.checks:
-                    self.baseline['tests'] = self.checks.run('tests', self.ws)
-                    self.log('check', phase='baseline', **self.baseline['tests'].to_dict())
-                intro = ('Attached project root: . (tool paths are relative to it)\nUser message: ' + task
-                         if self.config.conversational else self._intro(task))
-                self.messages = [{'role': 'system', 'content': self._system()},
-                                 {'role': 'user', 'content': intro}]
-                stop = None
-            if self.phase == 'chat':
-                if self.config.efficient_chat and self.conversation_context:
-                    # The full UI log was parsed before this query. Do not also replay
-                    # compacted model chatter, obsolete tool schemas and repeated answers.
-                    self.messages = [dict(role='system', content=self._system())]
-                    if self.chat_progress.get('pending'):
-                        self._say('Continue the unfinished response: ' + json.dumps(self.chat_progress))
-                # Refresh on every query, even after a saved session was compacted.
-                self.messages = [m for m in self.messages
-                                 if not (m.get('role') == 'user' and
-                                         str(m.get('content', '')).startswith('[query memory]\n'))]
-                memory = self.conversation_context
-                if self.lessons:
-                    memory += '\nSaved user lessons:\n' + '\n'.join(self.lessons)
-                if memory:
-                    self._say('[query memory]\n' + memory + '\nCurrent user request: ' + self.task)
-                stop, answer = self._conversation_round()
-                if stop:
-                    self.plan_terminal = (stop, answer)
-            if not stop and self.phase == 'plan':
-                stop, self.plan = self._approve()
-                if not stop:
-                    self.phase = 'execute'
-            elif not stop and not resume and self.phase == 'execute':
-                self._say('Start now: inspect, edit, verify, then call finish.')
-            plan = self.plan
-            if stop:
-                status, summary = self.plan_terminal or (stop, "No approved plan; nothing was changed.")
-            else:
-                status, summary = self._execute_phase()
-        except (ModelError, ContextOverflow) as exc:
-            status, summary = "error", f"Model server error: {exc}"
-        except Exception as exc:
-            status, summary = "error", f"Harness error: {type(exc).__name__}: {exc}"
-        except KeyboardInterrupt:
-            status, summary = 'cancelled', 'Interrupted; session saved for resume.'
+    def _start_fresh(self, task: str) -> None:
+        if self.config.conversational:
+            self.user_messages = [task]
+        elif self.config.baseline_checks and 'tests' in self.checks.checks:
+            self.baseline['tests'] = self.checks.run('tests', self.ws)
+            self.log('check', phase='baseline', **self.baseline['tests'].to_dict())
+        intro = ('Attached project root: . (tool paths are relative to it)\nUser message: ' + task
+                 if self.config.conversational else self._intro(task))
+        self.messages = [{'role': 'system', 'content': self._system()},
+                         {'role': 'user', 'content': intro}]
+
+    def _chat_turn(self) -> str | None:
+        """Rebuild the query memory for this turn and run one conversation round. Returns a stop status."""
+        if self.config.efficient_chat and self.conversation_context:
+            # The full UI log was parsed before this query. Do not also replay
+            # compacted model chatter, obsolete tool schemas and repeated answers.
+            self.messages = [dict(role='system', content=self._system())]
+            if self.chat_progress.get('pending'):
+                self._say('Continue the unfinished response: ' + json.dumps(self.chat_progress))
+        # Refresh on every query, even after a saved session was compacted.
+        self.messages = [m for m in self.messages
+                         if not (m.get('role') == 'user' and
+                                 str(m.get('content', '')).startswith('[query memory]\n'))]
+        memory = self.conversation_context
+        if self.lessons:
+            memory += '\nSaved user lessons:\n' + '\n'.join(self.lessons)
+        if memory:
+            self._say('[query memory]\n' + memory + '\nCurrent user request: ' + self.task)
+        stop, answer = self._conversation_round()
+        if stop:
+            self.plan_terminal = (stop, answer)
+        return stop
+
+    def _advance(self, resume: bool) -> tuple[str, str]:
+        """Move through chat -> plan -> execute and return the run's final (status, summary)."""
+        stop = self._chat_turn() if self.phase == 'chat' else None
+        if not stop and self.phase == 'plan':
+            stop, self.plan = self._approve()
+            if not stop:
+                self.phase = 'execute'
+        elif not stop and not resume and self.phase == 'execute':
+            self._say('Start now: inspect, edit, verify, then call finish.')
+        if stop:
+            return self.plan_terminal or (stop, "No approved plan; nothing was changed.")
+        return self._execute_phase()
+
+    def _finalize(self, status: str, summary: str) -> RunResult:
+        """Stop processes, write the evidence files, save the session and export the trace."""
         if not self.config.keep_dev_processes:
             stuck = self.dev.stop_all()
             if stuck:
                 self.log("dev_stop_failed", processes=stuck)
         patch = self.ws.patch()
-        result = RunResult(status, summary, patch, self.steps, self.ws.changed_files(), plan,
+        result = RunResult(status, summary, patch, self.steps, self.ws.changed_files(), self.plan,
                            {"baseline": {k: v.brief() for k, v in self.baseline.items()},
                             "final": {k: v.brief() for k, v in self.final.items()}},
                            str(self.evidence_dir), round(time.monotonic() - self.started, 1),
@@ -1191,3 +1181,23 @@ class Agent:
         except Exception as exc:  # observability must never change a run's outcome
             self.log("telemetry_error", error=f"{type(exc).__name__}: {exc}")
         return result
+
+    def run(self, task: str, *, resume: bool = False, message: str = "") -> RunResult:
+        self.started = time.monotonic()
+        self.task = task
+        self.log("resume" if resume else "start", task=task, config=asdict(self.config), checks=self.checks.names(),
+                 model=getattr(self.client, "model", None), project_config=self.project_config.path,
+                 config_errors=self.project_config.errors, reattached=self.dev.reattached)
+        try:
+            if resume:
+                self._restore_session(message)
+            else:
+                self._start_fresh(task)
+            status, summary = self._advance(resume)
+        except (ModelError, ContextOverflow) as exc:
+            status, summary = "error", f"Model server error: {exc}"
+        except Exception as exc:
+            status, summary = "error", f"Harness error: {type(exc).__name__}: {exc}"
+        except KeyboardInterrupt:
+            status, summary = 'cancelled', 'Interrupted; session saved for resume.'
+        return self._finalize(status, summary)
