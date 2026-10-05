@@ -492,35 +492,43 @@ command on every run.
 
 ### Phase F - browser/computer-use loop
 
-- app health discovery
-- development Chrome lifecycle
-- Chrome DevTools MCP tools
-- browser reproduction/evidence objects
-- post-fix replay
+- [x] app health discovery (`dev_health` against a configured local `health_url`)
+- [~] development Chrome lifecycle: owned by the Chrome DevTools adapter (`--isolated`, optionally
+  `--headless`); Nessa does not launch or stop Chrome itself
+- [x] Chrome DevTools MCP tools (validated headless 2026-10-05)
+- [x] browser reproduction/evidence objects: `browser_capture` saves console errors/warnings and failed
+  requests as `evidence/browser/<label>.json` (`agentharness/browser.py`; local pages only)
+- [x] post-fix replay: `browser_replay` recaptures and reports `fixed`, `improved`, `unchanged`,
+  `regressed` or `no_problems_seen`. The replay is guidance in the `browser-debug` skill; the finish
+  gate does not require it
 
 ### Phase G - memory and retrieval
 
-- durable episodic memory
-- evidence-linked lessons
-- semantic/file search
-- compact state retrieval
-- relevance scoring
-- explicit memory provenance
+- [x] durable episodic memory: `recall` searches earlier runs' failures, outcomes and requests
+  (`agentharness/recall.py`)
+- [x] evidence-linked lessons (each lesson records an evidence hash and version)
+- [~] semantic/file search: file search is regex; recall is lexical BM25 (shared words), not embeddings
+- [x] compact state retrieval (context digest)
+- [x] relevance scoring (BM25, newest first on ties)
+- [x] explicit memory provenance: every hit names its kind, source file and event, and date
 
 ### Phase H - local UI
 
-- task entry
-- loop timeline
-- active skill
-- tool calls
-- dev processes
-- browser state
-- tests/checks
-- reviewer notes
-- context budget
-- checkpoints
-- pause/resume
-- patch review
+- [x] task entry
+- [x] loop timeline (Timeline tab)
+- [x] active skill (skill events in Timeline and Processes)
+- [x] tool calls (Activity and Timeline)
+- [~] dev processes: shown from `dev_*` tool events in the recent feed, not from live process state
+- [x] browser state (captures listed in the Checks tab)
+- [x] tests/checks (latest status per check, verification receipt, integrity events)
+- [x] reviewer notes (Reviewer tab; advisory only)
+- [x] context budget (Context tab: serialized prompt bytes, not tokens)
+- [x] checkpoints (Timeline)
+- [x] pause/resume (Stop, then send a message to resume)
+- [x] patch review (Changes tab and Apply to project)
+
+The activity feed keeps the newest 80 events; panels describe what they can see, and
+`python -m agentharness report` renders a whole run from its evidence directory.
 
 ## 15. Acceptance tests
 

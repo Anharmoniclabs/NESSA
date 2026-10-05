@@ -157,6 +157,19 @@ Per-project settings live in `agentharness.toml` at the project root
 - Every run writes `timing.json` and an OTLP/JSON `trace.json` to its evidence directory.
   `[telemetry] otlp_endpoint` also exports to a local collector (names and timings only).
 
+- `python -m agentharness report EVIDENCE_DIR` writes a static HTML report of a run: result,
+  checks, verification receipt hashes, edit checkpoints, timing, browser captures and integrity
+  events. Every finish records a receipt tying the check results to the exact files they measured;
+  a finish is refused if the files changed afterwards, and a retry with identical files and an
+  identical failure stops early instead of spending retries.
+- `recall` (project runs) searches saved lessons and earlier runs of the same project by shared
+  words, ranked, with the source of each hit. It is lexical, not semantic.
+- With `[mcp.chrome-devtools]` configured, `browser_capture` and `browser_replay` record a local
+  page's console errors and failed requests and compare them after a fix.
+- `python -m agentharness promote freeze|evaluate|decide` scores a candidate harness version
+  against a frozen task set outside its workspace and gates promotion; see the
+  [audit](docs/HARNESS_WIRING_AUDIT.md#promotion-gate).
+
 ## Harness architecture
 
 See the [wiring audit](docs/HARNESS_WIRING_AUDIT.md) for the implemented

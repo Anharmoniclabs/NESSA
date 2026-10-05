@@ -94,6 +94,25 @@ instead of spending retries without new evidence. Receipts show which version a 
 result applies to; they do not show the checks are sufficient, and the hashes are not a
 security boundary against concurrent writers. Tests: `agentharness/tests/test_receipts.py`.
 
+## Promotion gate
+
+`python -m agentharness promote freeze|evaluate|decide` (`agentharness/promote.py`) scores a
+candidate harness version outside its editable workspace and gates promotion.
+
+1. `freeze` records the scoring command, each task directory and the scorer's files with hashes.
+2. `evaluate` verifies those hashes, copies the candidate into a fresh directory, runs the command
+   once per task (exit 0 = pass; `repeats` runs must all pass), records time and peak memory per
+   scoring process, then re-verifies the hashes so a run cannot have altered its exam.
+3. `decide` applies a policy; `--confirm <candidate identity>` records the promotion.
+
+Default policy, chosen by the implementation and adjustable with flags: no task the baseline
+passed may fail, at least one task must newly pass, median time at most 1.5x and peak memory at
+most 1.5x the baseline. Scorecards from different evaluations (including a different timeout) are
+refused. Promotion only writes `promotion.json` with both identities; it does not copy files.
+The harness's own unit tests are not part of the decision. Memory comes from `wait4`, so this is
+POSIX-only. Nothing here supplies a benchmark: the task set and scorer are yours to freeze, and
+a gate is only as meaningful as they are.
+
 ## Evidence and validation
 
 `agentharness/tests/test_architecture_wiring.py` specifically exercises:
@@ -134,8 +153,10 @@ contracts, MCP stdio/HTTP adapters, durable dev-process reconciliation, health p
 run timing/OTLP traces and desktop patch application have been added (see
 `agentharness/tests/test_project_config.py`). The Chrome DevTools adapter was validated headless on 2026-10-05 (page load plus console
 capture through `McpBus`), and `python -m agentharness report` renders a run's evidence as
-static HTML. Remaining: richer evidence retrieval/semantic search and an independently
-scored candidate-promotion loop.
+static HTML. Since then: ranked lexical evidence recall, browser capture/replay evidence, details-window
+panels and the promotion gate (below) were added. Remaining: embedding-based semantic search,
+requiring a browser replay before finish, and running the promotion gate against a real
+frozen benchmark of your own tasks.
 
 For a future improvement loop, freeze task snapshots and evaluation commands,
 score candidates outside their editable workspaces, retain baseline/candidate

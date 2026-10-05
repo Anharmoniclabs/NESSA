@@ -5,6 +5,8 @@
   extract FILES...        OCR/text + regex fields/tables -> CSV/JSON/Markdown
   config PROJECT [--mcp]  validate agentharness.toml (checks, dev, MCP, telemetry)
   lesson add|list         project-scoped notes injected into future runs
+  report EVIDENCE_DIR     static HTML report of one run
+  promote freeze|evaluate|decide   score a candidate harness outside its workspace; gate promotion
   doctor                  check the model server and optional tools
 """
 from __future__ import annotations
