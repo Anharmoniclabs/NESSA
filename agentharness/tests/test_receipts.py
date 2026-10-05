@@ -90,3 +90,23 @@ class DevCleanup(Base):
         self.assertEqual(stopped, ['fine'])
         self.assertEqual(list(failures), ['stuck'])
         self.assertIn('PermissionError', failures['stuck'])
+
+
+class Report(Base):
+    def test_report_shows_checks_and_receipt_and_escapes_event_text(self):
+        from agentharness import report
+        result = self.agent([[('read_file', {'path': 'calc.py'})], [FIX],
+                             [('finish', {'summary': 'done'})]], plan_first=False).run('fix add')
+        evidence = Path(result.evidence_dir)
+        with (evidence / 'events.jsonl').open('a') as f:
+            f.write(json.dumps({'seq': 999, 't': 0, 'event': 'repeated_failure',
+                                'failing': ['<script>alert(1)</script>']}) + '\n')
+        page = report.render(evidence)
+        self.assertIn(result.receipt['workspace_sha'][:16], page)
+        self.assertIn('tests', page)
+        self.assertNotIn('<script>', page)
+        self.assertIn('&lt;script&gt;', page)
+
+    def test_report_command_fails_cleanly_without_evidence(self):
+        from agentharness.__main__ import main
+        self.assertEqual(main(['report', str(self.tmp / 'nowhere')]), 1)

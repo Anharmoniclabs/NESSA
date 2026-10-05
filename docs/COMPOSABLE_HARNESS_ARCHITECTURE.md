@@ -474,12 +474,12 @@ command on every run.
 - [x] stdio adapter
 - [x] tool discovery, shared per project across turns
 - [x] tool output normalization (text/resource/image placeholders, bounded, isError -> ERROR)
-- [~] Chrome DevTools adapter: configured as `[mcp.chrome-devtools]`; needs Node.js, not validated on this machine
+- [x] Chrome DevTools adapter: validated 2026-10-05 headless on Linux/Node 22 through `McpBus` (new_page, list_console_messages captured a page's console error); needs Node.js and a Chrome/Chromium
 
 ### Phase D - developer observability
 
 - [x] OpenTelemetry spans (OTLP/JSON `trace.json`; optional export to a local collector)
-- [ ] local collector/dashboard skill
+- [x] local run dashboard: `python -m agentharness report <evidence_dir>` writes a static, escaped HTML report (no collector needed)
 - [x] trace file in run evidence
 - [x] model/tool/check timing summaries (`timing.json`)
 

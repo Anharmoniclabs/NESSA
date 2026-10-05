@@ -132,8 +132,9 @@ The core agent loop is implemented. Since this audit, project-defined configurat
 (`agentharness.toml`), structural-check registration, executable skill verification
 contracts, MCP stdio/HTTP adapters, durable dev-process reconciliation, health probes,
 run timing/OTLP traces and desktop patch application have been added (see
-`agentharness/tests/test_project_config.py`). Remaining: a validated Chrome DevTools
-session (needs Node.js), richer evidence retrieval/semantic search, and an independently
+`agentharness/tests/test_project_config.py`). The Chrome DevTools adapter was validated headless on 2026-10-05 (page load plus console
+capture through `McpBus`), and `python -m agentharness report` renders a run's evidence as
+static HTML. Remaining: richer evidence retrieval/semantic search and an independently
 scored candidate-promotion loop.
 
 For a future improvement loop, freeze task snapshots and evaluation commands,

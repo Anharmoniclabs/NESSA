@@ -305,6 +305,19 @@ def cmd_doctor(a) -> int:
     return 0 if ok else 1
 
 
+def cmd_report(a) -> int:
+    from . import report
+    try:
+        page = report.render(Path(a.evidence_dir))
+    except FileNotFoundError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    out = Path(a.out) if a.out else Path(a.evidence_dir) / "report.html"
+    out.write_text(page, encoding="utf-8")
+    print(out)
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="agentharness", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -411,6 +424,11 @@ def main(argv=None) -> int:
     l.add_argument("project")
     l.add_argument("text", nargs="?", default="")
     l.set_defaults(fn=cmd_lesson)
+
+    rp = sub.add_parser("report", help="write an HTML report for a run's evidence directory")
+    rp.add_argument("evidence_dir")
+    rp.add_argument("--out", default="", help="output file (default: report.html inside the evidence directory)")
+    rp.set_defaults(fn=cmd_report)
 
     d = sub.add_parser("doctor", help="check setup")
     model_args(d)

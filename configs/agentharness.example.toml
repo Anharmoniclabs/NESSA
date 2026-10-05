@@ -31,6 +31,8 @@ timeout = 60
 # [mcp.chrome-devtools]                # browser debugging (needs Node.js)
 # transport = "stdio"
 # argv = ["npx", "-y", "chrome-devtools-mcp@latest", "--isolated"]
+# Headless or containers: add "--headless", "--executablePath", "/path/to/chrome", "--chromeArg=--no-sandbox".
+# Page tools take a numeric pageId; call list_pages first.
 
 # [mcp.local-http]                     # streamable HTTP; non-local URLs need allow_remote = true
 # transport = "http"

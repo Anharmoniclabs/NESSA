@@ -65,7 +65,8 @@ BUILTINS = {
 2. Prefer a configured Chrome DevTools MCP adapter when present: `[mcp.chrome-devtools]` in
    agentharness.toml exposes tools named mcp__chrome-devtools__*. The browser session
    must be a development/debug session, not a personal authenticated browsing profile.
-3. Inspect console errors, network failures, DOM state and performance traces relevant to the task.
+3. Open or select a page with new_page/list_pages; page tools take the numeric pageId it reports.
+   Inspect console errors, network failures, DOM state and performance traces relevant to the task.
 4. Correlate browser observations with source files and application logs.
 5. After a fix, repeat the same browser observation and then run the repository's normal tests.
 6. Save concise evidence (URL, observation, relevant error/trace, post-fix result) into the run log.""",
