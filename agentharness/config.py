@@ -113,6 +113,108 @@ def _int(value, where: str, errors: list, low: int = 0) -> int | None:
     return None
 
 
+LOCAL_URL = r"https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?"
+SECTIONS = {"context", "verification", "reviewer", "checks", "dev", "mcp", "telemetry"}
+
+
+def _parse_verification(data: dict, cfg: ProjectConfig) -> None:
+    errors = cfg.errors
+    context = data.get("context", {})
+    if "max_chars" in context:
+        cfg.context_max_chars = _int(context["max_chars"], "context.max_chars", errors, 1000)
+    verification = data.get("verification", {})
+    if "continuous" in verification:
+        cfg.continuous = _strings(verification["continuous"], "verification.continuous", errors)
+    if "finish" in verification:
+        cfg.finish = _strings(verification["finish"], "verification.finish", errors)
+    if "full_every_edits" in verification:
+        cfg.full_every_edits = _int(verification["full_every_edits"], "verification.full_every_edits", errors)
+    reviewer = data.get("reviewer", {})
+    if "every_edits" in reviewer:
+        cfg.review_every_edits = _int(reviewer["every_edits"], "reviewer.every_edits", errors, 1)
+
+
+def _parse_checks(data: dict, cfg: ProjectConfig) -> None:
+    for name, command in data.get("checks", {}).items():
+        if name == "syntax":
+            cfg.errors.append("checks.syntax is built in and cannot be replaced")
+        elif not NAME.fullmatch(name) or not isinstance(command, str) or not command.strip():
+            cfg.errors.append(f"checks.{name} must be a non-empty command string")
+        else:
+            cfg.checks[name] = command.strip()
+
+
+def _parse_dev(data: dict, cfg: ProjectConfig) -> None:
+    errors = cfg.errors
+    for name, spec in data.get("dev", {}).items():
+        where = f"dev.{name}"
+        if not NAME.fullmatch(name) or not isinstance(spec, dict):
+            errors.append(f"{where} must be a table with a valid name")
+            continue
+        argv = _strings(spec.get("argv"), f"{where}.argv", errors)
+        health = spec.get("health_url", "")
+        if health and not re.match(LOCAL_URL + r"(/|$)", str(health)):
+            errors.append(f"{where}.health_url must be a local http(s) URL")
+            health = ""
+        if argv:
+            cfg.dev[name] = DevPreset(list(argv), str(spec.get("cwd", ".")), str(health))
+
+
+def _parse_mcp_server(name: str, spec: dict, errors: list) -> McpServer | None:
+    """Build one validated server, or None (with the reason appended to errors)."""
+    where = f"mcp.{name}"
+    transport = spec.get("transport", "stdio")
+    server = McpServer(name, transport, cwd=str(spec.get("cwd", ".")),
+                       allow_remote=bool(spec.get("allow_remote", False)))
+    if "timeout" in spec:
+        if isinstance(spec["timeout"], (int, float)) and 1 <= spec["timeout"] <= 600:
+            server.timeout = float(spec["timeout"])
+        else:
+            errors.append(f"{where}.timeout must be 1..600 seconds")
+    if "read_only" in spec:
+        server.read_only = _strings(spec["read_only"], f"{where}.read_only", errors) or ()
+    env = spec.get("env", {})
+    if isinstance(env, dict) and all(isinstance(v, str) for v in env.values()):
+        server.env = dict(env)
+    else:
+        errors.append(f"{where}.env must map names to strings")
+    if transport == "stdio":
+        argv = _strings(spec.get("argv"), f"{where}.argv", errors)
+        if not argv:
+            return None
+        server.argv = list(argv)
+    elif transport == "http":
+        url = str(spec.get("url", ""))
+        if not url.startswith(("http://", "https://")):
+            errors.append(f"{where}.url must be an http(s) URL")
+            return None
+        server.url = url
+    else:
+        errors.append(f"{where}.transport must be 'stdio' or 'http'")
+        return None
+    return server
+
+
+def _parse_mcp(data: dict, cfg: ProjectConfig) -> None:
+    for name, spec in data.get("mcp", {}).items():
+        if not NAME.fullmatch(name) or not isinstance(spec, dict):
+            cfg.errors.append(f"mcp.{name} must be a table with a valid name")
+            continue
+        server = _parse_mcp_server(name, spec, cfg.errors)
+        if server is not None:
+            cfg.mcp[name] = server
+
+
+def _parse_telemetry(data: dict, cfg: ProjectConfig) -> None:
+    endpoint = data.get("telemetry", {}).get("otlp_endpoint", "")
+    if not endpoint:
+        return
+    if re.match(LOCAL_URL + "/", str(endpoint)):
+        cfg.otlp_endpoint = str(endpoint)
+    else:
+        cfg.errors.append("telemetry.otlp_endpoint must be a local http(s) URL")
+
+
 def load(repo: Path) -> ProjectConfig:
     repo = Path(repo)
     path = next((repo / n for n in FILE_NAMES if (repo / n).is_file()), None)
@@ -125,91 +227,9 @@ def load(repo: Path) -> ProjectConfig:
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         cfg.errors.append(f"cannot parse {cfg.path}: {exc}")
         return cfg
-    errors = cfg.errors
-    known = {"context", "verification", "reviewer", "checks", "dev", "mcp", "telemetry"}
-    for key in data:
-        if key not in known:
-            errors.append(f"unknown section [{key}]")
-
-    context = data.get("context", {})
-    if "max_chars" in context:
-        cfg.context_max_chars = _int(context["max_chars"], "context.max_chars", errors, 1000)
-
-    verification = data.get("verification", {})
-    if "continuous" in verification:
-        cfg.continuous = _strings(verification["continuous"], "verification.continuous", errors)
-    if "finish" in verification:
-        cfg.finish = _strings(verification["finish"], "verification.finish", errors)
-    if "full_every_edits" in verification:
-        cfg.full_every_edits = _int(verification["full_every_edits"], "verification.full_every_edits", errors)
-
-    reviewer = data.get("reviewer", {})
-    if "every_edits" in reviewer:
-        cfg.review_every_edits = _int(reviewer["every_edits"], "reviewer.every_edits", errors, 1)
-
-    for name, command in data.get("checks", {}).items():
-        if name == "syntax":
-            errors.append("checks.syntax is built in and cannot be replaced")
-        elif not NAME.fullmatch(name) or not isinstance(command, str) or not command.strip():
-            errors.append(f"checks.{name} must be a non-empty command string")
-        else:
-            cfg.checks[name] = command.strip()
-
-    for name, spec in data.get("dev", {}).items():
-        where = f"dev.{name}"
-        if not NAME.fullmatch(name) or not isinstance(spec, dict):
-            errors.append(f"{where} must be a table with a valid name")
-            continue
-        argv = _strings(spec.get("argv"), f"{where}.argv", errors)
-        health = spec.get("health_url", "")
-        if health and not re.match(r"https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(/|$)", str(health)):
-            errors.append(f"{where}.health_url must be a local http(s) URL")
-            health = ""
-        if argv:
-            cfg.dev[name] = DevPreset(list(argv), str(spec.get("cwd", ".")), str(health))
-
-    for name, spec in data.get("mcp", {}).items():
-        where = f"mcp.{name}"
-        if not NAME.fullmatch(name) or not isinstance(spec, dict):
-            errors.append(f"{where} must be a table with a valid name")
-            continue
-        transport = spec.get("transport", "stdio")
-        server = McpServer(name, transport, cwd=str(spec.get("cwd", ".")),
-                           allow_remote=bool(spec.get("allow_remote", False)))
-        if "timeout" in spec:
-            if isinstance(spec["timeout"], (int, float)) and 1 <= spec["timeout"] <= 600:
-                server.timeout = float(spec["timeout"])
-            else:
-                errors.append(f"{where}.timeout must be 1..600 seconds")
-        if "read_only" in spec:
-            server.read_only = _strings(spec["read_only"], f"{where}.read_only", errors) or ()
-        env = spec.get("env", {})
-        if isinstance(env, dict) and all(isinstance(v, str) for v in env.values()):
-            server.env = dict(env)
-        else:
-            errors.append(f"{where}.env must map names to strings")
-        if transport == "stdio":
-            argv = _strings(spec.get("argv"), f"{where}.argv", errors)
-            if not argv:
-                continue
-            server.argv = list(argv)
-        elif transport == "http":
-            url = str(spec.get("url", ""))
-            if not url.startswith(("http://", "https://")):
-                errors.append(f"{where}.url must be an http(s) URL")
-                continue
-            server.url = url
-        else:
-            errors.append(f"{where}.transport must be 'stdio' or 'http'")
-            continue
-        cfg.mcp[name] = server
-
-    endpoint = data.get("telemetry", {}).get("otlp_endpoint", "")
-    if endpoint:
-        if re.match(r"https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?/", str(endpoint)):
-            cfg.otlp_endpoint = str(endpoint)
-        else:
-            errors.append("telemetry.otlp_endpoint must be a local http(s) URL")
+    cfg.errors.extend(f"unknown section [{key}]" for key in data if key not in SECTIONS)
+    for parse in (_parse_verification, _parse_checks, _parse_dev, _parse_mcp, _parse_telemetry):
+        parse(data, cfg)
     return cfg
 
 

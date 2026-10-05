@@ -318,43 +318,41 @@ def cmd_report(a) -> int:
     return 0
 
 
-def main(argv=None) -> int:
-    p = argparse.ArgumentParser(prog="agentharness", description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = p.add_subparsers(dest="cmd", required=True)
+def _model_args(sp):
+    sp.add_argument("--base-url", default=DEFAULT_URL)
+    sp.add_argument("--profile", choices=PROFILES, default="default")
+    sp.add_argument("--model", default=DEFAULT_MODEL)
+    sp.add_argument("--temperature", type=float, default=None)
+    sp.add_argument("--reasoning-effort", choices=("none", "low", "medium", "high"), default=None)
+    sp.add_argument("--max-tokens", type=int, default=None)
+    sp.add_argument("--allow-remote", action="store_true", help="permit a non-local model server")
 
-    def model_args(sp):
-        sp.add_argument("--base-url", default=DEFAULT_URL)
-        sp.add_argument("--profile", choices=PROFILES, default="default")
-        sp.add_argument("--model", default=DEFAULT_MODEL)
-        sp.add_argument("--temperature", type=float, default=None)
-        sp.add_argument("--reasoning-effort", choices=("none", "low", "medium", "high"), default=None)
-        sp.add_argument("--max-tokens", type=int, default=None)
-        sp.add_argument("--allow-remote", action="store_true", help="permit a non-local model server")
 
-    def agent_args(sp):
-        model_args(sp)
-        sp.add_argument("--progress", action="store_true", help="show tool/check events while running")
-        sp.add_argument("--max-context-chars", type=int, default=None)
-        sp.add_argument("--tool-output-chars", type=int, default=None)
-        sp.add_argument("--max-steps", type=int, default=40)
-        sp.add_argument("--no-plan", action="store_true", help="skip the plan/approval phase")
-        sp.add_argument("--no-shell", action="store_true", help="disable run_command")
-        sp.add_argument("--no-baseline", action="store_true", help="skip running tests before changes")
-        sp.add_argument("--text-tools", action="store_true", default=None, help="JSON-in-text tool calls (no native tools)")
-        sp.add_argument("--verify", default=None,
-                        help="checks run when the agent finishes (default syntax,tests or agentharness.toml)")
-        sp.add_argument("--continuous-verify", default=None,
-                        help="cheap checks run automatically after every successful edit")
-        sp.add_argument("--full-verify-every-edits", type=int, default=None,
-                        help="run the tests check every N successful edits (default 3); 0 disables")
-        sp.add_argument("--review-model", default=os.environ.get("AGENT_REVIEW_MODEL", ""),
-                        help="optional second local model used only for advisory code review")
-        sp.add_argument("--review-base-url", default=os.environ.get("AGENT_REVIEW_BASE_URL", ""),
-                        help="reviewer model server; defaults to --base-url")
-        sp.add_argument("--review-every-edits", type=int, default=None,
-                        help="ask reviewer for notes every N successful edits")
+def _agent_args(sp):
+    _model_args(sp)
+    sp.add_argument("--progress", action="store_true", help="show tool/check events while running")
+    sp.add_argument("--max-context-chars", type=int, default=None)
+    sp.add_argument("--tool-output-chars", type=int, default=None)
+    sp.add_argument("--max-steps", type=int, default=40)
+    sp.add_argument("--no-plan", action="store_true", help="skip the plan/approval phase")
+    sp.add_argument("--no-shell", action="store_true", help="disable run_command")
+    sp.add_argument("--no-baseline", action="store_true", help="skip running tests before changes")
+    sp.add_argument("--text-tools", action="store_true", default=None, help="JSON-in-text tool calls (no native tools)")
+    sp.add_argument("--verify", default=None,
+                    help="checks run when the agent finishes (default syntax,tests or agentharness.toml)")
+    sp.add_argument("--continuous-verify", default=None,
+                    help="cheap checks run automatically after every successful edit")
+    sp.add_argument("--full-verify-every-edits", type=int, default=None,
+                    help="run the tests check every N successful edits (default 3); 0 disables")
+    sp.add_argument("--review-model", default=os.environ.get("AGENT_REVIEW_MODEL", ""),
+                    help="optional second local model used only for advisory code review")
+    sp.add_argument("--review-base-url", default=os.environ.get("AGENT_REVIEW_BASE_URL", ""),
+                    help="reviewer model server; defaults to --base-url")
+    sp.add_argument("--review-every-edits", type=int, default=None,
+                    help="ask reviewer for notes every N successful edits")
 
+
+def _register_work_commands(sub) -> None:
     r = sub.add_parser("run", help="work on a project")
     r.add_argument("project")
     r.add_argument("task", nargs="?", default="")
@@ -365,14 +363,14 @@ def main(argv=None) -> int:
     r.add_argument("--auto-approve", action="store_true")
     r.add_argument("--show-diff", action="store_true")
     r.add_argument("--apply", action="store_true", help="offer to git-apply the patch to PROJECT")
-    agent_args(r)
+    _agent_args(r)
     r.set_defaults(fn=cmd_run)
 
     chat = sub.add_parser('chat', help='terminal conversation with tools and durable follow-ups')
     chat.add_argument('project')
     chat.add_argument('--work')
     chat.add_argument('--auto-approve', action='store_true')
-    agent_args(chat)
+    _agent_args(chat)
     chat.set_defaults(fn=cmd_chat)
 
     resume = sub.add_parser('resume', help='continue an existing private workspace without replaying tools')
@@ -380,9 +378,11 @@ def main(argv=None) -> int:
     resume.add_argument('--message', default='', help='answer a clarification or steer the task')
     resume.add_argument('--extra-steps', type=int, default=0)
     resume.add_argument('--extra-seconds', type=float, default=0)
-    model_args(resume)
+    _model_args(resume)
     resume.set_defaults(fn=cmd_resume)
 
+
+def _register_batch_and_extract(sub) -> None:
     b = sub.add_parser("batch", help="unattended run over tasks.jsonl")
     b.add_argument("--comp", required=True, help="folder with tasks.jsonl and snapshots/")
     b.add_argument("--out", default="predictions.jsonl")
@@ -391,7 +391,7 @@ def main(argv=None) -> int:
     b.add_argument("--limit", type=int)
     b.add_argument("--id-key", default="instance_id")
     b.add_argument("--patch-key", default="model_patch")
-    agent_args(b)
+    _agent_args(b)
     b.set_defaults(fn=cmd_batch)
 
     e = sub.add_parser("extract", help="documents -> table")
@@ -410,6 +410,8 @@ def main(argv=None) -> int:
     e.add_argument("--tables-out")
     e.set_defaults(fn=cmd_extract)
 
+
+def _register_utility_commands(sub) -> None:
     sk = sub.add_parser("skills", help="list built-in and repository micro-harness skills")
     sk.add_argument("project")
     sk.set_defaults(fn=cmd_skills)
@@ -431,10 +433,22 @@ def main(argv=None) -> int:
     rp.set_defaults(fn=cmd_report)
 
     d = sub.add_parser("doctor", help="check setup")
-    model_args(d)
+    _model_args(d)
     d.set_defaults(fn=cmd_doctor)
 
-    a = p.parse_args(argv)
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="agentharness", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    _register_work_commands(sub)
+    _register_batch_and_extract(sub)
+    _register_utility_commands(sub)
+    return p
+
+
+def main(argv=None) -> int:
+    a = build_parser().parse_args(argv)
     if hasattr(a, "profile"):
         apply_profile(a)
     return a.fn(a)

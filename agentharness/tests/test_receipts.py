@@ -1,5 +1,6 @@
 """Verification receipts bind evidence to the workspace and checks that produced it."""
 import json
+import unittest
 from pathlib import Path
 
 from agentharness import receipt as receipts
@@ -110,3 +111,36 @@ class Report(Base):
     def test_report_command_fails_cleanly_without_evidence(self):
         from agentharness.__main__ import main
         self.assertEqual(main(['report', str(self.tmp / 'nowhere')]), 1)
+
+
+class CommandLine(unittest.TestCase):
+    def test_every_subcommand_parses_with_its_required_arguments(self):
+        from agentharness.__main__ import build_parser
+        parser = build_parser()
+        cases = {'run': ['run', 'proj', 'task'], 'chat': ['chat', 'proj'], 'resume': ['resume', 'work'],
+                 'batch': ['batch', '--comp', 'c'], 'extract': ['extract', 'a.pdf'], 'skills': ['skills', 'proj'],
+                 'config': ['config', 'proj'], 'lesson': ['lesson', 'list', 'proj'],
+                 'report': ['report', 'ev'], 'doctor': ['doctor']}
+        for name, argv in cases.items():
+            self.assertEqual(parser.parse_args(argv).cmd, name)
+
+
+class ToolContract(unittest.TestCase):
+    KINDS = {'read', 'edit', 'check', 'dev', 'control', 'mcp'}
+
+    def test_every_tool_has_schema_kind_and_unique_name(self):
+        from agentharness.tools import build_tools
+        tools = build_tools()
+        for name, tool in tools.items():
+            self.assertEqual(name, tool.name)
+            self.assertTrue(tool.description.strip(), name)
+            self.assertIn(tool.kind, self.KINDS, name)
+            self.assertEqual(tool.schema()['function']['parameters']['required'], list(tool.required))
+            self.assertTrue(set(tool.required) <= set(tool.params), name)
+        self.assertEqual(len(tools), len({t.name for t in tools.values()}))
+
+    def test_disabling_shell_and_extraction_removes_those_tools(self):
+        from agentharness.tools import build_tools
+        full, bare = build_tools(), build_tools(allow_shell=False, allow_extract=False)
+        self.assertLessEqual({'run_command', 'dev_start', 'extract_text', 'extract_table'}, set(full))
+        self.assertFalse({'run_command', 'dev_start', 'extract_text', 'extract_table'} & set(bare))
