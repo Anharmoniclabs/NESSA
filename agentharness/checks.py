@@ -129,7 +129,8 @@ def syntax_check(ws) -> CheckResult:
 
 
 def detect_checks(repo: Path) -> dict[str, Check]:
-    """Default checks: syntax always; tests when the project appears to have Python tests."""
+    """Syntax always; tests when the project appears to have Python tests; then any
+    `[checks]` from the project's agentharness.toml, which replace detected commands."""
     checks: dict[str, Check] = {"syntax": syntax_check}
     has_tests = any(repo.glob("test*/**/*.py")) or any(repo.glob("**/test_*.py")) \
         or any(repo.glob("**/*_test.py"))
@@ -139,6 +140,8 @@ def detect_checks(repo: Path) -> dict[str, Check]:
             checks["tests"] = f"{py} -m pytest -q -p no:cacheprovider"
         else:
             checks["tests"] = f"{py} -m unittest discover -q"
+    from .config import load
+    checks.update(load(repo).checks)
     return checks
 
 

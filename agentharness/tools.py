@@ -89,7 +89,17 @@ def _extract_table(ctx, args) -> str:
 
 
 def build_tools(allow_shell: bool = True, allow_extract: bool = True) -> dict[str, Tool]:
+    from .studio import command as studio_command
+
     tools = [
+        Tool('studio_control', 'Operate the real AnharmonicStudio app for requested music production. '
+             'Launches it if needed. Actions: open, status, make_beat (editable two-bar drums), '
+             'set_tempo, play, stop. Existing pads are preserved; beat/tempo changes support Undo. '
+             'Only act on the user\'s requested operation. No arbitrary app actions are supported.',
+             {'action': {**S, 'enum': ['open', 'status', 'make_beat', 'set_tempo', 'play', 'stop']},
+              'kit': {**S, 'enum': ['Pocket', 'Circuit', 'Midnight', 'Trap Foundry']},
+              'bpm': {'type': 'number', 'minimum': 40, 'maximum': 240}},
+             ('action',), 'control', handler=lambda c,a: studio_command(a), cacheable=False),
         Tool('local_list', 'List a local folder under the configured user document/project roots. Use runtime_info to see roots.',
              {'path': S}, ('path',), 'read', handler=lambda c,a: _local_list(c,a), cacheable=False),
         Tool('local_read', 'Read text or OCR a document/image under configured local roots without copying a project. Supply an absolute path.',
@@ -148,9 +158,14 @@ def build_tools(allow_shell: bool = True, allow_extract: bool = True) -> dict[st
              kind="read", handler=lambda c, a: c.skills.summary()),
         Tool("use_skill", "Activate a focused micro-harness recipe in the current agent. This does not spawn another agent.",
              {"name": S}, ("name",), "read", handler=lambda c, a: c.activate_skill(a["name"])),
-        Tool("dev_start", "Start a named local development process using an argv array (no shell). Logs go to run evidence.",
-             {"name": S, "argv": {"type": "array", "items": S}, "cwd": S}, ("name", "argv"), "dev",
-             handler=lambda c, a: c.dev.start(a["name"], a["argv"], a.get("cwd", "."))),
+        Tool("dev_start", "Start a named local development process using an argv array (no shell). Logs go to run evidence. "
+             "Omit argv to start a process configured in agentharness.toml [dev.NAME].",
+             {"name": S, "argv": {"type": "array", "items": S}, "cwd": S}, ("name",), "dev",
+             handler=lambda c, a: c.dev.start(a["name"], a.get("argv"), a.get("cwd"))),
+        Tool("dev_health", "Probe a local HTTP health URL for a dev process (configured health_url or `url`). "
+             "A live process is not proof that the app works.",
+             {"name": S, "url": S}, ("name",), "read",
+             handler=lambda c, a: c.dev.health(a["name"], a.get("url", "")), cacheable=False),
         Tool("dev_status", "Show status of one or all managed local development processes.",
              {"name": S}, kind="read", handler=lambda c, a: c.dev.status(a.get("name")), cacheable=False),
         Tool("dev_logs", "Tail captured logs from a managed development process.",

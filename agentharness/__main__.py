@@ -3,6 +3,7 @@
   run PROJECT "task"      plan, approve, edit a private copy, verify, write a patch
   batch --comp DIR        unattended run over DIR/tasks.jsonl (Kaggle layout)
   extract FILES...        OCR/text + regex fields/tables -> CSV/JSON/Markdown
+  config PROJECT [--mcp]  validate agentharness.toml (checks, dev, MCP, telemetry)
   lesson add|list         project-scoped notes injected into future runs
   doctor                  check the model server and optional tools
 """
@@ -24,7 +25,7 @@ from .llm import ChatClient, ModelError
 from .memory import LessonStore
 from .reviewer import Reviewer
 from .skills import SkillRegistry
-from .workspace import Workspace
+from .workspace import ToolError, Workspace
 from .profiles import PROFILES, apply_profile
 from .session import SessionStore
 
@@ -39,15 +40,22 @@ def _client(a) -> ChatClient:
 
 
 def _config(a, **over) -> AgentConfig:
+    """Explicit verification flags win over agentharness.toml; unset ones defer to it."""
+    names = lambda text: tuple(v for v in text.split(",") if v)
+    chosen = {}
+    if a.verify is not None:
+        chosen["verify"] = names(a.verify)
+    if a.continuous_verify is not None:
+        chosen["continuous_verify"] = names(a.continuous_verify)
+    if a.full_verify_every_edits is not None:
+        chosen["full_verify_every_edits"] = max(0, a.full_verify_every_edits)
+    if a.review_every_edits is not None:
+        chosen["review_every_edits"] = max(1, a.review_every_edits)
     return AgentConfig(max_context_chars=a.max_context_chars, tool_output_chars=a.tool_output_chars,
                        compact_at_tokens=6144 if a.profile in ("laptop-i3-12gb", "lfm-i3-12gb") else 22000,
                        max_steps=a.max_steps, plan_first=not a.no_plan, allow_shell=not a.no_shell,
                        tool_mode="text" if a.text_tools else "native",
-                       baseline_checks=not a.no_baseline,
-                       verify=tuple(v for v in a.verify.split(",") if v),
-                       continuous_verify=tuple(v for v in a.continuous_verify.split(",") if v),
-                       full_verify_every_edits=max(0, a.full_verify_every_edits),
-                       review_every_edits=max(1, a.review_every_edits), **over)
+                       baseline_checks=not a.no_baseline, explicit=tuple(chosen), **chosen, **over)
 
 
 def cli_approver(plan: dict) -> tuple[bool, str]:
@@ -143,8 +151,8 @@ def cmd_chat(a) -> int:
     client = _client(a)
     reviewer = Reviewer(ChatClient(a.review_base_url or a.base_url, a.review_model,
                         max_tokens=min(a.max_tokens, 4096), allow_remote=a.allow_remote)) if a.review_model else None
-    task, resume = '', False
-    print(f'NESSA chat | private workspace: {work} | /quit to exit')
+    task, resume, last = '', False, None
+    print(f'NESSA chat | private workspace: {work} | /apply writes accepted changes | /quit to exit')
     while True:
         try:
             message = input('you> ').strip()
@@ -155,13 +163,24 @@ def cmd_chat(a) -> int:
             return 0
         if not message:
             continue
+        if message == '/apply':
+            if last is None or last.status not in ('verified', 'unverified'):
+                print('Nothing to apply: only verified or unverified results can be applied.')
+                continue
+            if input(f'Write {", ".join(ws.changed_files())} into {project}? [y/N] ').strip().lower() != 'y':
+                continue
+            try:
+                print('Applied:', ', '.join(ws.apply_to(project)) or 'nothing (no unapplied changes)')
+            except ToolError as exc:
+                print(exc)
+            continue
         if not resume:
             task = message
         agent = Agent(client, ws, config=cfg, checks=checks,
                       approver=cli_approver if cfg.require_approval else None,
                       on_event=print_event, reviewer=reviewer,
                       lessons=LessonStore().relevant(str(project), message))
-        result = agent.run(task, resume=resume, message=message if resume else '')
+        result = last = agent.run(task, resume=resume, message=message if resume else '')
         print(f'nessa> {result.summary}', flush=True)
         if result.status not in ('answered', 'awaiting_input'):
             print(f'[{result.status}] Evidence: {result.evidence_dir}', flush=True)
@@ -233,6 +252,25 @@ def cmd_skills(a) -> int:
     return 0
 
 
+def cmd_config(a) -> int:
+    from .config import load
+    project = Path(a.project).resolve()
+    cfg = load(project)
+    print(cfg.describe())
+    print("registered checks: " + ", ".join(detect_checks(project)))
+    if a.mcp and cfg.mcp:
+        from .mcp import McpBus
+        bus = McpBus(cfg.mcp, project, Path.home() / ".agentharness" / "mcp-logs")
+        try:
+            print(bus.summary())
+            for name, tool in sorted(bus.tools().items()):
+                print(f"  {name} [{tool.kind}] {tool.description[:100]}")
+        finally:
+            bus.close()
+        return 1 if bus.errors or cfg.errors else 0
+    return 1 if cfg.errors else 0
+
+
 def cmd_lesson(a) -> int:
     store = LessonStore()
     key = str(Path(a.project).resolve())
@@ -291,16 +329,17 @@ def main(argv=None) -> int:
         sp.add_argument("--no-shell", action="store_true", help="disable run_command")
         sp.add_argument("--no-baseline", action="store_true", help="skip running tests before changes")
         sp.add_argument("--text-tools", action="store_true", default=None, help="JSON-in-text tool calls (no native tools)")
-        sp.add_argument("--verify", default="syntax,tests", help="checks run when the agent finishes")
-        sp.add_argument("--continuous-verify", default="syntax",
+        sp.add_argument("--verify", default=None,
+                        help="checks run when the agent finishes (default syntax,tests or agentharness.toml)")
+        sp.add_argument("--continuous-verify", default=None,
                         help="cheap checks run automatically after every successful edit")
-        sp.add_argument("--full-verify-every-edits", type=int, default=3,
-                        help="run the tests check every N successful edits; 0 disables")
+        sp.add_argument("--full-verify-every-edits", type=int, default=None,
+                        help="run the tests check every N successful edits (default 3); 0 disables")
         sp.add_argument("--review-model", default=os.environ.get("AGENT_REVIEW_MODEL", ""),
                         help="optional second local model used only for advisory code review")
         sp.add_argument("--review-base-url", default=os.environ.get("AGENT_REVIEW_BASE_URL", ""),
                         help="reviewer model server; defaults to --base-url")
-        sp.add_argument("--review-every-edits", type=int, default=2,
+        sp.add_argument("--review-every-edits", type=int, default=None,
                         help="ask reviewer for notes every N successful edits")
 
     r = sub.add_parser("run", help="work on a project")
@@ -361,6 +400,11 @@ def main(argv=None) -> int:
     sk = sub.add_parser("skills", help="list built-in and repository micro-harness skills")
     sk.add_argument("project")
     sk.set_defaults(fn=cmd_skills)
+
+    cf = sub.add_parser("config", help="validate a project's agentharness.toml")
+    cf.add_argument("project")
+    cf.add_argument("--mcp", action="store_true", help="connect configured MCP servers and list their tools")
+    cf.set_defaults(fn=cmd_config)
 
     l = sub.add_parser("lesson", help="project notes for future runs")
     l.add_argument("action", choices=["add", "list"])

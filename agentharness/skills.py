@@ -45,14 +45,16 @@ BUILTINS = {
         "observe-local-app",
         "Launch and observe a local development application through managed dev-process tools.",
         """1. Inspect the repository manifests and instructions to find the canonical dev command.
-2. Start the app with dev_start using argv, never by inventing a background shell pipeline.
-3. Confirm it remains alive with dev_status and inspect dev_logs for startup errors.
+2. Start the app with dev_start using argv (or a name configured in agentharness.toml [dev.NAME]),
+   never by inventing a background shell pipeline.
+3. Confirm it remains alive with dev_status, inspect dev_logs for startup errors, and probe
+   dev_health when a local health URL exists.
 4. Prefer the repository's existing telemetry configuration. If an OpenTelemetry collector or
    local dashboard is already defined, start it as another named dev process.
 5. Reproduce the issue while collecting application logs and test evidence.
 6. Stop temporary processes when they are no longer needed. Do not treat 'process is alive' as
    verification that the application behavior is correct.""",
-        ("list_dir", "read_file", "dev_start", "dev_status", "dev_logs", "dev_stop", "run_check"),
+        ("list_dir", "read_file", "dev_start", "dev_status", "dev_logs", "dev_health", "dev_stop", "run_check"),
         (),
         ("startup", "behavior", "tests"),
     ),
@@ -60,13 +62,14 @@ BUILTINS = {
         "browser-debug",
         "Attach browser debugging to the local application instead of reasoning from static HTML alone.",
         """1. Ensure the application is running with the local dev-process harness.
-2. Prefer a configured Chrome DevTools for agents MCP adapter when present. The browser session
+2. Prefer a configured Chrome DevTools MCP adapter when present: `[mcp.chrome-devtools]` in
+   agentharness.toml exposes tools named mcp__chrome-devtools__*. The browser session
    must be a development/debug session, not a personal authenticated browsing profile.
 3. Inspect console errors, network failures, DOM state and performance traces relevant to the task.
 4. Correlate browser observations with source files and application logs.
 5. After a fix, repeat the same browser observation and then run the repository's normal tests.
 6. Save concise evidence (URL, observation, relevant error/trace, post-fix result) into the run log.""",
-        ("dev_status", "dev_logs", "run_command", "run_check"),
+        ("dev_status", "dev_logs", "dev_health", "run_command", "run_check"),
         ("chrome", "node"),
         ("browser reproduction", "post-fix browser check", "tests"),
     ),

@@ -179,6 +179,13 @@ class Window:
         self.details.geometry('800x580')
         self.details.configure(bg=BG)
         self.details.protocol('WM_DELETE_WINDOW', self.details.withdraw)
+        actions = ttk.Frame(self.details, padding=(18, 12, 18, 0))
+        actions.pack(fill='x')
+        self.apply_button = ttk.Button(actions, text='Apply to project', style='Accent.TButton',
+                                       command=self.apply_changes, state='disabled')
+        self.apply_button.pack(side='right')
+        ttk.Label(actions, text='Changes stay in a private copy until you apply them.',
+                  foreground=MUTED, font=(FONT, 9)).pack(side='left')
         self.tabs = ttk.Notebook(self.details)
         self.tabs.pack(fill='both', expand=True, padx=18, pady=18)
         self.activity = self.text_tab(self.tabs, 'Activity')
@@ -344,6 +351,18 @@ class Window:
             self.app.decide(self.current, approved)
             self.approval.grid_remove()
 
+    def apply_changes(self):
+        if not self.current:
+            return
+        d = self.app.snapshot(self.current)
+        files = '\n'.join(d.get('result', {}).get('changed_files') or [])
+        if not messagebox.askyesno('Apply changes', f"Write these files into {d['project']}?\n\n{files}"):
+            return
+        try:
+            self.app.apply(self.current)
+        except ValueError as exc:
+            messagebox.showerror('Not applied', str(exc))
+
     def stop(self):
         if self.current:
             self.app.stop(self.current)
@@ -401,6 +420,9 @@ class Window:
                 patch = 'Evidence: '+result['evidence_dir']+'\n\n'+patch
             if self.patch.get('1.0', 'end-1c') != patch:
                 self.set_text(self.patch, patch)
+            applyable = (d['project'] and not d['busy'] and result.get('patch')
+                         and result.get('status') in ('verified', 'unverified'))
+            self.apply_button.configure(state='normal' if applyable else 'disabled')
             self.send_button.configure(state='disabled' if d['busy'] or self.creating else 'normal')
             if d['busy']:
                 self.stop_button.pack(side='right', padx=8)
@@ -424,7 +446,9 @@ class Window:
                 status = 'Stopping at the next response or tool boundary…'
             elif d['busy'] and d.get('partial'):
                 status = 'Nessa is replying…'
-            self.model_label.configure(text='✳  '+('Project model' if d.get('active_model') == self.app.model and d['busy'] else 'Fast chat'))
+            active = d.get('active_model', '')
+            label = 'Local LFM' if active.startswith('nessa-lfm:') else 'Local chat'
+            self.model_label.configure(text='✳  ' + label)
             if not self.creating:
                 self.status.configure(text=status)
         self.root.after(400, self.tick)
@@ -433,6 +457,7 @@ class Window:
         if self.creating or any(c.data['busy'] for c in self.app.chats.values()):
             messagebox.showinfo('Nessa is working', 'Use Stop and wait for the current operation to return before closing. Project copying also needs to finish.')
             return
+        self.app.shutdown()
         self.root.destroy()
 
 
@@ -441,8 +466,8 @@ def main():
     p.add_argument('project', nargs='?')
     p.add_argument('--base-url', default='http://127.0.0.1:11435/v1')
     p.add_argument('--model', default='nessa-lfm:latest')
-    p.add_argument('--chat-model', default='nessa-chat:latest')
-    p.add_argument('--chat-base-url', default='http://127.0.0.1:11436/v1')
+    p.add_argument('--chat-model', default='nessa-lfm:latest')
+    p.add_argument('--chat-base-url', default='http://127.0.0.1:11435/v1')
     p.add_argument('--review-model', help='optional advisory reviewer; disabled by default')
     p.add_argument('--review-base-url', help='reviewer endpoint; defaults to the project model endpoint')
     p.add_argument('--sessions', type=Path, default=Path.home() / '.agentharness/desktop-chats')

@@ -25,6 +25,44 @@ class ContextOverflow(ModelError):
     """The server rejected the request, usually because the prompt is too long."""
 
 
+class PartialResponse(ModelError):
+    """Interrupted text is evidence, not a completed reply or executable action."""
+
+    def __init__(self, message, content):
+        super().__init__(message)
+        self.content = content
+
+
+class VisibleText:
+    """Hide inline reasoning even when the server streams it as ordinary content."""
+    def __init__(self, callback):
+        self.callback, self.pending, self.state = callback, '', 'prefix'
+        self.text = ''
+
+    def feed(self, chunk):
+        self.pending += chunk
+        if self.state == 'prefix':
+            stripped = self.pending.lstrip()
+            if '<think>'.startswith(stripped):
+                if stripped != '<think>':
+                    return
+            if stripped.startswith('<think>'):
+                self.pending = stripped[len('<think>'):]
+                self.state = 'thinking'
+            else:
+                self.state = 'answer'
+        if self.state == 'thinking':
+            if '</think>' not in self.pending:
+                self.pending = self.pending[-7:]
+                return
+            self.pending = self.pending.split('</think>', 1)[1].lstrip()
+            self.state = 'answer'
+        if self.state == 'answer' and self.pending:
+            text, self.pending = self.pending, ''
+            self.text += text
+            self.callback(text)
+
+
 @dataclass
 class ToolCall:
     id: str
@@ -52,6 +90,8 @@ class ChatClient:
         host = urllib.parse.urlparse(base_url).hostname
         if host not in LOCAL_HOSTS and not allow_remote:
             raise ValueError(f"Refusing non-local model server {host!r}; pass allow_remote=True to override.")
+        if (model.endswith(':cloud') or model.endswith('-cloud')) and not allow_remote:
+            raise ValueError('Cloud model names are disabled in local-only mode.')
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.temperature = temperature
@@ -84,7 +124,8 @@ class ChatClient:
                 err = ModelError(f"HTTP {exc.code}: {detail}")
             except (OSError, ValueError) as exc:
                 err = exc
-            time.sleep(2 * (attempt + 1))
+            if attempt + 1 < self.retries:
+                time.sleep(2 * (attempt + 1))
         raise ModelError(f"Model server unavailable after {self.retries} attempts: {err}")
 
     def models(self) -> list[str]:
@@ -97,6 +138,7 @@ class ChatClient:
             data=json.dumps(body).encode(), headers={'Content-Type': 'application/json',
             'Authorization': f'Bearer {self.api_key}'})
         content, reasoning, calls, usage, finish = [], [], {}, {}, None
+        visible = VisibleText(self.on_delta)
         size = 0
         started = time.monotonic()
         try:
@@ -123,7 +165,7 @@ class ChatClient:
                         delta = choice.get('delta') or {}
                         if delta.get('content'):
                             content.append(delta['content'])
-                            self.on_delta(delta['content'])
+                            visible.feed(delta['content'])
                         if delta.get('reasoning_content') or delta.get('reasoning'):
                             reasoning.append(delta.get('reasoning_content') or delta['reasoning'])
                         for call in delta.get('tool_calls') or []:
@@ -141,9 +183,18 @@ class ChatClient:
             if exc.code == 400 and any(w in detail.lower() for w in ('context length', 'context window', 'too many tokens', 'context size')):
                 raise ContextOverflow(detail) from exc
             raise ModelError(f'HTTP {exc.code}: {detail}') from exc
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, ModelError) as exc:
+            if visible.text and not calls:
+                raise PartialResponse(str(exc), visible.text) from exc
             raise ModelError(f'Local model stream failed: {exc}') from exc
+        except KeyboardInterrupt:
+            # Let the controller checkpoint visible prose before honouring Stop.
+            exc = KeyboardInterrupt()
+            exc.partial_content = visible.text if not calls else ''
+            raise exc
         if finish is None:
+            if visible.text and not calls:
+                raise PartialResponse('Model stream ended before completion', visible.text)
             raise ModelError('Model stream ended before completion')
         return {'choices': [{'finish_reason': finish, 'message': {'content': ''.join(content),
             'reasoning_content': ''.join(reasoning), 'tool_calls': [calls[k] for k in sorted(calls)]}}], 'usage': usage}

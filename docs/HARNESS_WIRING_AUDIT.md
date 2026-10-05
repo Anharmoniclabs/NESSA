@@ -50,12 +50,12 @@ not run for greetings. Streaming changes presentation, not verification authorit
 | Skills | Repository `.agent/skills/*`, built-in recipes, `use_skill` | Recipes remain in the parent loop; declared skill checks are guidance, not automatically registered executable checks |
 | Review | Optional `Reviewer`, periodic and final advisory notes | No tools or completion authority; disabled by default to preserve local responsiveness |
 | Backend separation | Local OpenAI-compatible `ChatClient`; optional chat client in the same Agent | Desktop is wired to fast/large models; CLI keeps its selected model unless configured in Python |
-| Development processes | Named start/status/logs/wait/stop, bounded log observations | No process reattachment or interactive PTY recovery after parent restart |
-| Telemetry | JSON events, model timing, receipts, checkpoints | No OpenTelemetry exporter, centralized tracing service or complete cost accounting |
+| Development processes | Named start/status/logs/wait/health/stop, config presets, reattach after restart | No interactive PTY; desktop keeps processes until the window closes |
+| Telemetry | JSON events, receipts, `timing.json`, OTLP/JSON `trace.json`, optional local OTLP export | No dashboard or cost accounting; prompts/outputs are not exported |
 | Benchmarking | Scripted regression tests, `batch.py`, real-model smoke acceptance | Batch output is not a protected holdout evaluator or a promotion decision |
 | Recursive improvement | Nessa can propose patches to a harness in a private workspace | No automatic train/benchmark/compare/promote/revert outer loop; no weight training |
 | Subagents | Not wired | Intentionally one parent agent loop, per AGENTS.md; parallel benchmark tasks are independent runs |
-| Browser / MCP / external services | Not wired | A browser recipe is not a working browser or MCP adapter |
+| Browser / MCP / external services | `[mcp.*]` servers from agentharness.toml, tools `mcp__SERVER__TOOL` | Non-read-only MCP tools need plan approval; Chrome DevTools needs Node.js and is not validated here |
 
 `verified` means the configured finish checks passed with a non-syntax check;
 it is not proof of broad agent competence. Missing tests, syntax-only validation,
@@ -117,10 +117,13 @@ Prior measured chat latency evidence is separate, under
 
 ## Remaining work before the full proposed stack exists
 
-The core agent loop is implemented. The major unimplemented additions are
-project-defined configuration and structural-check registration, executable skill
-verification contracts, MCP/browser adapters, richer evidence retrieval, durable
-process reconciliation, and an independently scored candidate-promotion loop.
+The core agent loop is implemented. Since this audit, project-defined configuration
+(`agentharness.toml`), structural-check registration, executable skill verification
+contracts, MCP stdio/HTTP adapters, durable dev-process reconciliation, health probes,
+run timing/OTLP traces and desktop patch application have been added (see
+`agentharness/tests/test_project_config.py`). Remaining: a validated Chrome DevTools
+session (needs Node.js), richer evidence retrieval/semantic search, and an independently
+scored candidate-promotion loop.
 
 For a future improvement loop, freeze task snapshots and evaluation commands,
 score candidates outside their editable workspaces, retain baseline/candidate

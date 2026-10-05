@@ -411,7 +411,7 @@ These are "whole-codebase" tests: they assert architecture rather than only vali
 
 ## 13. Local configuration
 
-Add a future `agentharness.toml`:
+Implemented as `agentharness.toml` (see `configs/agentharness.example.toml`):
 
 ```toml
 [context]
@@ -460,37 +460,35 @@ command on every run.
 
 ### Phase B - durable session/context engine
 
-- event-sourced session state
-- restart-safe checkpoint manifest
-- context digest
-- exact resume
-- progress leases/budgets
-- durable dev-process reconciliation
+- [x] event-sourced session state (`events.jsonl`, operation receipts)
+- [x] restart-safe checkpoint manifest (per-edit diffs, atomic `session.json`)
+- [x] context digest
+- [x] exact resume (no replay of uncertain operations)
+- [x] progress budgets (steps/time; extendable on resume)
+- [x] durable dev-process reconciliation (pid + kernel start time; reattach, status, stop)
 
 ### Phase C - MCP adapter bus
 
-- MCP client interface
-- stateless HTTP adapter
-- stdio adapter
-- tool discovery/cache
-- tool output normalization
-- Chrome DevTools adapter
+- [x] MCP client interface (`agentharness/mcp.py`)
+- [x] streamable HTTP adapter (JSON and SSE replies, session header; remote URLs opt-in)
+- [x] stdio adapter
+- [x] tool discovery, shared per project across turns
+- [x] tool output normalization (text/resource/image placeholders, bounded, isError -> ERROR)
+- [~] Chrome DevTools adapter: configured as `[mcp.chrome-devtools]`; needs Node.js, not validated on this machine
 
 ### Phase D - developer observability
 
-- OpenTelemetry spans/metrics
-- local collector/dashboard skill
-- trace viewer links in run evidence
-- model/tool/check timing summaries
+- [x] OpenTelemetry spans (OTLP/JSON `trace.json`; optional export to a local collector)
+- [ ] local collector/dashboard skill
+- [x] trace file in run evidence
+- [x] model/tool/check timing summaries (`timing.json`)
 
 ### Phase E - structural conformance
 
-- `agentharness.toml`
-- custom check registry
-- ESLint/pnpm adapter
-- ast-grep adapter
-- dependency graph adapter
-- architecture test examples
+- [x] `agentharness.toml` (`agentharness/config.py`, `python -m agentharness config`)
+- [x] custom check registry (`[checks]`; skill-declared registered checks gate finish)
+- [~] ESLint/pnpm, ast-grep, dependency-cruiser: run as `[checks]` commands; no dedicated parsers
+- [x] architecture test example (`test_structural_violation_fails_architecture_check`)
 
 ### Phase F - browser/computer-use loop
 

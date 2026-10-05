@@ -1,0 +1,40 @@
+# Copy to the root of a project as agentharness.toml.
+# Validate with: python -m agentharness config /path/to/project [--mcp]
+# Explicit command-line flags win over this file; this file wins over built-in defaults.
+
+[context]
+max_chars = 12000                      # budget for AGENTS.md / agent instructions
+
+[verification]
+continuous = ["syntax"]                # after every successful edit
+full_every_edits = 3                   # run `tests` every N edits; 0 disables
+finish = ["syntax", "tests", "lint"]   # all must pass before a run is accepted
+
+[reviewer]
+every_edits = 2                        # only used with --review-model
+
+[checks]                               # shell commands run in the private copy
+tests = "python -m pytest -q"
+lint = "ruff check ."
+
+[dev.app]                              # dev_start(name="app") needs no argv
+argv = ["python", "-m", "http.server", "8000"]
+cwd = "."
+health_url = "http://127.0.0.1:8000/"
+
+[mcp.time]                             # stdio MCP server; tools appear as mcp__time__*
+transport = "stdio"
+argv = ["uvx", "mcp-server-time"]
+read_only = ["get_current_time", "convert_time"]
+timeout = 60
+
+# [mcp.chrome-devtools]                # browser debugging (needs Node.js)
+# transport = "stdio"
+# argv = ["npx", "-y", "chrome-devtools-mcp@latest", "--isolated"]
+
+# [mcp.local-http]                     # streamable HTTP; non-local URLs need allow_remote = true
+# transport = "http"
+# url = "http://127.0.0.1:3001/mcp"
+
+# [telemetry]
+# otlp_endpoint = "http://127.0.0.1:4318/v1/traces"   # local OTLP/HTTP collector

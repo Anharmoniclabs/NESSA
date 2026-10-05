@@ -278,6 +278,41 @@ class Workspace:
         return [r for r in sorted(a.keys() | b.keys())
                 if r not in a or r not in b or a[r].read_bytes() != b[r].read_bytes()]
 
+    def apply_to(self, project: Path) -> list[str]:
+        """Copy changed files into the original project after an explicit user decision.
+
+        Refuses (changing nothing) when any target differs from the snapshot baseline, so
+        edits the user made after the copy are never overwritten. Applied files become the
+        new baseline: a later patch contains only newer work.
+        """
+        project = Path(project).resolve()
+        if not project.is_dir():
+            raise ToolError(f"Project folder not found: {project}")
+        changed = self.changed_files()
+        conflicts = []
+        for r in changed:
+            target, base = project / r, self.baseline / r
+            if target.is_symlink() or project not in target.resolve().parents:
+                conflicts.append(f"{r} (outside the project or a symlink)")
+            elif base.is_file() != target.is_file() or (
+                    base.is_file() and base.read_bytes() != target.read_bytes()):
+                conflicts.append(f"{r} (changed in the project since it was copied)")
+        if conflicts:
+            raise ToolError("Not applied; no files were changed. Conflicts: " + "; ".join(conflicts))
+        for r in changed:
+            src, target, base = self.repo / r, project / r, self.baseline / r
+            if src.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                tmp = target.with_name(target.name + ".nessa-tmp")
+                shutil.copy2(src, tmp)
+                os.replace(tmp, target)
+                base.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, base)
+            else:
+                target.unlink(missing_ok=True)
+                base.unlink(missing_ok=True)
+        return changed
+
     def patch(self) -> str:
         out = []
         for r in self.changed_files():

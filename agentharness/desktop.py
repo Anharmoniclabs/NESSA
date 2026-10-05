@@ -4,18 +4,26 @@ import json
 import threading
 import time
 import uuid
+import re
 from pathlib import Path
 
 from .agent import Agent, AgentConfig, RunResult
 from .checks import CheckRunner, detect_checks
+from .dev import DevProcessManager
 from .llm import ChatClient
-from .memory import LessonStore
+from .memory import ConversationMemory, LessonStore
 from .reviewer import Reviewer
 from .profiles import PROFILES
 from .project_discovery import find_project, overview
 from .online import is_news_query
 from .session import atomic_json
-from .workspace import Workspace
+from .workspace import ToolError, Workspace
+from . import studio
+from .session import SessionStore
+
+
+APPLYABLE = ('verified', 'unverified')
+APPLY_COMMAND = re.compile(r'\s*apply( the)? (changes|patch)( to (the )?project)?[.!\s]*', re.I)
 
 
 class Chat:
@@ -25,6 +33,7 @@ class Chat:
         self.cancel = threading.Event()
         self.decision = threading.Event()
         self.answer = (False, '')
+        self.last_partial_save = 0.0
 
     def save(self):
         atomic_json(self.directory / 'chat.json', self.data)
@@ -36,9 +45,19 @@ class Chat:
         with self.lock:
             if name == 'model_started':
                 self.data['partial'] = ''
+                self.data['stream_message_count'] = data.get('message_count')
                 self.data['active_model'] = data.get('model')
                 self.data['model_started_at'] = time.time()
+            elif name == 'chat_part':
+                self.data['messages'].append(dict(role='assistant', content=data['content'], status='answered'))
+                self.data.setdefault('turn_parts', []).append(data['content'])
+                self.data['partial'] = ''
             self.data['activity'] = (self.data['activity'] + [dict(event=name, time=time.time(), data=data)])[-80:]
+            if name == 'tool' and data.get('name') == 'studio_control':
+                output = data.get('output', '')
+                if output.startswith('{'):
+                    self.data['studio_connected'] = True
+                    self.data['studio_last_result'] = output[:2000]
             self.save()
 
     def delta(self, text):
@@ -49,6 +68,9 @@ class Chat:
             if not self.data.get('partial'):
                 self.data['first_token_seconds'] = time.time() - self.data.get('model_started_at', time.time())
             self.data['partial'] = self.data.get('partial', '') + text
+            if time.monotonic() - self.last_partial_save >= 1:
+                self.save()
+                self.last_partial_save = time.monotonic()
 
     def approve(self, plan):
         with self.lock:
@@ -66,8 +88,8 @@ class Chat:
 
 
 class App:
-    def __init__(self, root, base_url, model, chat_model='nessa-chat:latest',
-                 chat_base_url='http://127.0.0.1:11436/v1', review_model=None, review_base_url=None):
+    def __init__(self, root, base_url, model, chat_model='nessa-lfm:latest',
+                 chat_base_url='http://127.0.0.1:11435/v1', review_model=None, review_base_url=None):
         self.root, self.base_url, self.model = Path(root), base_url, model
         self.chat_model = chat_model
         self.chat_base_url = chat_base_url
@@ -78,9 +100,22 @@ class App:
         for p in self.root.glob('*/chat.json'):
             d = json.loads(p.read_text())
             if d.get('busy'):
+                partial = d.get('partial', '')
+                if partial:
+                    d['messages'].append(dict(role='assistant', content=partial, status='interrupted'))
+                    work = Path(d.get('work_directory', p.parent))
+                    state_path = work / 'evidence/session.json'
+                    if state_path.exists():
+                        state = json.loads(state_path.read_text())
+                        # Commit only a stream whose assistant message was not saved yet.
+                        if state.get('phase') == 'chat' and len(state['messages']) == d.get('stream_message_count'):
+                            state['messages'].append(dict(role='assistant', content=partial))
+                            state['chat_progress'] = dict(request=state['task'], tail=partial[-2000:], pending=True)
+                            atomic_json(state_path, state)
                 d['messages'].append(dict(role='assistant', content='The previous session was interrupted. Send a message to continue.', status='interrupted'))
             d.update(busy=False, plan=None, partial='')
             self.chats[d['id']] = Chat(p.parent, d)
+            self.chats[d['id']].save()
 
     def create(self, project=None):
         project = Path(project).expanduser().resolve() if project else None
@@ -110,6 +145,7 @@ class App:
             chat.data['busy'] = True
             chat.data['plan'] = None
             chat.data['partial'] = ''
+            chat.data['turn_parts'] = []
             chat.data['first_token_seconds'] = None
             chat.data['messages'].append(dict(role='user', content=message))
             if len(chat.data['messages']) == 1:
@@ -120,8 +156,59 @@ class App:
 
     def run(self, chat, message):
         try:
+            with chat.lock:
+                context = ConversationMemory(chat.directory / 'memory-cache.json').refresh(
+                    chat.data['messages'], message, max_chars=1600)
+            chat.event('memory_loaded', dict(messages=len(chat.data['messages']), characters=len(context)))
+            # Explicit user-authored memory commands run locally, even offline.
+            note = re.fullmatch(r'\s*remember\s+([\w.-]{1,80})\s*:\s*(.+)', message, re.I | re.S)
+            forget = re.fullmatch(r'\s*forget\s+([\w.-]{1,80})\s*', message, re.I)
+            if note or forget:
+                store = LessonStore()
+                scope = chat.data['project'] or '*'
+                if note:
+                    row = store.add(scope, note[2], source=str(chat.directory / 'chat.json'), key=note[1])
+                    answer = f"Remembered {note[1]} (version {row['version']})."
+                else:
+                    row = store.forget(scope, forget[1])
+                    answer = f'Forgot {forget[1]}.'
+                chat.event('memory_updated', row)
+                with chat.lock:
+                    chat.data['messages'].append(dict(role='assistant', content=answer, status='answered'))
+                    chat.data['result'] = RunResult('answered', answer, '', 0, [], None).to_dict()
+                return
+            if APPLY_COMMAND.fullmatch(message):
+                with chat.lock:
+                    chat.data['busy'] = False
+                try:
+                    self.apply(chat.data['id'])
+                except ValueError as exc:
+                    with chat.lock:
+                        chat.data['messages'].append(dict(role='assistant', content=str(exc), status='blocked'))
+                return
+            studio_args = studio.quick_request(message, studio_context=chat.data.get('studio_connected', False))
+            if studio_args:
+                store = SessionStore(chat.directory / 'evidence')
+                receipt = store.begin('studio_control', studio_args, uuid.uuid4().hex, 'control')
+                chat.event('studio_started', studio_args)
+                try:
+                    output = studio.command(studio_args)
+                except Exception as exc:
+                    store.finish(receipt, str(exc), 'failed')
+                    raise
+                unknown = output.startswith('TIMEOUT')
+                store.finish(receipt, output, 'outcome_unknown' if unknown else 'completed')
+                answer = studio.describe(output)
+                with chat.lock:
+                    chat.data['studio_connected'] = not unknown
+                    chat.data['studio_last_result'] = output[:2000]
+                    status = 'blocked' if unknown else 'answered'
+                    chat.data['messages'].append(dict(role='assistant', content=answer, status=status))
+                    chat.data['result'] = RunResult(status, answer, '', 0, [], None).to_dict()
+                chat.event('studio_result', {'output': output})
+                return
             # Resolving a named local project should not wait behind inference.
-            if not chat.data['project']:
+            if not chat.data['project'] and not studio.production_request(message):
                 matches = find_project(message, [Path.home() / 'Projects'])
                 if len(matches) > 1:
                     answer = 'I found multiple matching projects: ' + ', '.join(str(p) for p in matches) + '. Which one should I inspect?'
@@ -139,30 +226,39 @@ class App:
             profile = PROFILES['lfm-i3-12gb']
             client = ChatClient(self.base_url, self.model, max_tokens=profile['max_tokens'],
                                 temperature=profile['temperature'], reasoning_effort=profile['reasoning_effort'])
-            fast = ChatClient(self.chat_base_url, self.chat_model, max_tokens=512,
-                              temperature=0.2, timeout=45, retries=1,
+            fast = ChatClient(self.chat_base_url, self.chat_model, max_tokens=640,
+                              temperature=0.2, timeout=180, retries=1, reasoning_effort='none',
                               on_delta=None if is_news_query(message) else chat.delta)
             work_directory = Path(chat.data.get('work_directory', chat.directory))
             if not (work_directory / 'repo').exists():
                 Workspace.create(Path(chat.data['project']), work_directory)
             ws = Workspace(work_directory)
-            cfg = AgentConfig(conversational=True, require_approval=True,
+            cfg = AgentConfig(conversational=True, efficient_chat=True, require_approval=True,
+                              studio_context=chat.data.get('studio_last_result', ''),
                               tool_mode='text' if profile['text_tools'] else 'native',
                               local_roots=tuple(str(Path.home()/name) for name in ('Projects', 'Documents', 'Downloads', 'Desktop', 'Pictures')),
                               max_context_chars=profile['max_context_chars'],
-                              tool_output_chars=profile['tool_output_chars'], compact_at_tokens=6144)
+                              tool_output_chars=profile['tool_output_chars'], compact_at_tokens=6144,
+                              keep_dev_processes=True)
             resume = (work_directory / 'evidence/session.json').exists()
             task = chat.data['messages'][0]['content'] if resume else message
-            lessons = LessonStore().relevant(chat.data['project'], message) if chat.data['project'] else []
+            lessons = LessonStore().relevant(chat.data['project'] or '*', message)
             reviewer = Reviewer(ChatClient(self.review_base_url or self.base_url, self.review_model,
                                 max_tokens=512)) if self.review_model else None
             result = Agent(client, ws, config=cfg, checks=CheckRunner(detect_checks(ws.repo)),
                            approver=chat.approve, on_event=chat.event, chat_client=fast,
-                           lessons=lessons, reviewer=reviewer).run(
+                           lessons=lessons, reviewer=reviewer, conversation_context=context).run(
                                task, resume=resume, message=message if resume else '')
             with chat.lock:
                 chat.data['result'] = result.to_dict()
-                chat.data['messages'].append(dict(role='assistant', content=result.summary, status=result.status))
+                summary = result.summary
+                saved_parts = '\n\n'.join(chat.data.get('turn_parts', []))
+                if saved_parts and summary.startswith(saved_parts):
+                    summary = summary[len(saved_parts):].strip()
+                if result.status == 'cancelled' and chat.data.get('partial'):
+                    chat.data['messages'].append(dict(role='assistant', content=chat.data['partial'], status='interrupted'))
+                if summary:
+                    chat.data['messages'].append(dict(role='assistant', content=summary, status=result.status))
         except BaseException as exc:
             with chat.lock:
                 chat.data['messages'].append(dict(role='assistant', content='Stopped.' if isinstance(exc, KeyboardInterrupt)
@@ -172,6 +268,42 @@ class App:
                 chat.data.update(busy=False, plan=None, partial='')
                 chat.save()
 
+
+    def apply(self, key):
+        """Write the latest accepted private changes into the real project."""
+        chat = self.chats[key]
+        with chat.lock:
+            if chat.data['busy']:
+                raise ValueError('Wait for the current reply before applying changes.')
+            if not chat.data.get('project'):
+                raise ValueError('This conversation has no attached project.')
+            status = (chat.data.get('result') or {}).get('status')
+            if status not in APPLYABLE:
+                raise ValueError(f'Only verified or unverified results can be applied (latest: {status or "none"}).')
+            ws = Workspace(Path(chat.data.get('work_directory', chat.directory)))
+            try:
+                changed = ws.apply_to(Path(chat.data['project']))
+            except ToolError as exc:
+                raise ValueError(str(exc)) from exc
+            if not changed:
+                raise ValueError('There are no unapplied changes.')
+            answer = 'Applied to ' + chat.data['project'] + ': ' + ', '.join(changed)
+            chat.data['messages'].append(dict(role='assistant', content=answer, status='answered'))
+            chat.data['result'] = dict(chat.data['result'], patch='', applied=changed)
+            chat.data['activity'] = (chat.data['activity'] + [dict(event='patch_applied', time=time.time(),
+                                                                    data=dict(files=changed))])[-80:]
+            chat.save()
+            return changed
+
+    def shutdown(self):
+        """Stop dev processes that conversations kept running between turns."""
+        for chat in list(self.chats.values()):
+            evidence = Path(chat.data.get('work_directory', chat.directory)) / 'evidence'
+            if (evidence / 'dev' / 'processes.json').exists():
+                try:
+                    DevProcessManager(Workspace(evidence.parent), evidence).stop_all()
+                except Exception:
+                    pass
 
     def snapshot(self, key):
         chat = self.chats[key]

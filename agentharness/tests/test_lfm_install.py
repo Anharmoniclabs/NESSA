@@ -59,10 +59,10 @@ class LFM(unittest.TestCase):
         self.assertEqual(reply.raw_tool_calls, [call])
         self.assertEqual(reply.tool_calls[0].arguments, {'path': 'calc.py'})
 
-    def test_profile_uses_json_tools_without_overriding_explicit_model(self):
+    def test_profile_uses_native_tools_without_overriding_explicit_model(self):
         args = apply_profile(argparse.Namespace(profile='lfm-i3-12gb', model='custom'))
         self.assertEqual(args.model, 'custom')
-        self.assertTrue(args.text_tools)
+        self.assertFalse(args.text_tools)  # LFM JSON-text calls omitted tool names in live runs
         self.assertEqual(args.reasoning_effort, 'none')
         self.assertEqual(args.temperature, 0.2)
 
@@ -78,8 +78,10 @@ class LFM(unittest.TestCase):
                              '--model', 'fake-model', '--base-url', server.url, '--auto-approve',
                              '--work', str(Path(tmp) / 'work')])
             self.assertEqual(code, 0)
-            self.assertNotIn('tools', server.requests[0])
-            self.assertIn('exactly one JSON object', server.requests[0]['messages'][0]['content'])
+            offered = {t['function']['name'] for t in server.requests[0]['tools']}
+            self.assertIn('read_file', offered)
+            self.assertIn('propose_plan', offered)
+            self.assertFalse(offered & {'studio_control', 'weather', 'local_list'})  # assistant-only tools
             for request in server.requests:
                 self.assertEqual(request['reasoning_effort'], 'none')
                 self.assertEqual(request['max_tokens'], 3072)

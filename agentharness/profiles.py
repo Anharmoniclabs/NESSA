@@ -1,6 +1,8 @@
 """Conservative local CPU presets; no automatic downloads or cloud fallback."""
 PROFILES = {
-    'lfm-i3-12gb': dict(model='nessa-lfm:latest', max_tokens=3072, text_tools=True,
+    # LFM emits reliable native <|tool_call_start|> calls; in JSON-text mode it often wrote
+    # bare arguments without a tool name, so project work never started (2026-10-04 probe).
+    'lfm-i3-12gb': dict(model='nessa-lfm:latest', max_tokens=3072, text_tools=False,
                        max_context_chars=18000, tool_output_chars=2500, temperature=0.2,
                        reasoning_effort='none'),
     'default': dict(model='qwen2.5-coder:3b', max_tokens=4096, text_tools=False,
