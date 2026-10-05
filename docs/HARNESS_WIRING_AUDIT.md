@@ -83,6 +83,17 @@ Existing state files remain readable. Legacy sessions cannot recover recipe
 snapshots or lessons that were never saved; reactivate a skill or retrieve the
 project lessons on a new turn to populate that state.
 
+## Version-bound verification receipts
+
+`agentharness/receipt.py` hashes the workspace patch and the registered check definitions
+at the moment the finish checks complete, before acceptance grading or review. The
+`verification_receipt` event and `RunResult.receipt` record it. A finish is not accepted
+as verified if the workspace no longer matches (`stale_receipt`), and a finish retried
+with identical files, checks and failure output stops at once (`repeated_failure`)
+instead of spending retries without new evidence. Receipts show which version a check
+result applies to; they do not show the checks are sufficient, and the hashes are not a
+security boundary against concurrent writers. Tests: `agentharness/tests/test_receipts.py`.
+
 ## Evidence and validation
 
 `agentharness/tests/test_architecture_wiring.py` specifically exercises:

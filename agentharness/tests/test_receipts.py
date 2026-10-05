@@ -1,0 +1,72 @@
+"""Verification receipts bind evidence to the workspace and checks that produced it."""
+import json
+from pathlib import Path
+
+from agentharness import receipt as receipts
+from agentharness.agent import Agent, AgentConfig
+from agentharness.checks import CheckRunner, syntax_check
+from agentharness.tests.test_agent import Base, ScriptedClient, UNITTEST
+
+
+FIX = ('replace_in_file', {'path': 'calc.py', 'old': 'a - b', 'new': 'a + b'})
+BREAK = ('replace_in_file', {'path': 'calc.py', 'old': 'a - b', 'new': 'a * b'})
+
+
+class Receipts(Base):
+    def events(self, result):
+        return [json.loads(l) for l in (Path(result.evidence_dir) / 'events.jsonl').read_text().splitlines()]
+
+    def test_verified_run_carries_receipt_matching_final_files(self):
+        result = self.agent([[('read_file', {'path': 'calc.py'})], [FIX],
+                             [('finish', {'summary': 'done'})]], plan_first=False).run('fix add')
+        self.assertEqual(result.status, 'verified')
+        self.assertEqual(result.receipt['statuses']['tests'], 'passed')
+        self.assertEqual(result.receipt['workspace_sha'], receipts.workspace_fingerprint(self.ws))
+        self.assertEqual(json.loads((Path(result.evidence_dir) / 'result.json').read_text())['receipt'],
+                         result.receipt)
+
+    def test_receipt_goes_stale_when_files_or_check_definitions_change(self):
+        self.ws.read('calc.py'); self.ws.replace('calc.py', 'a - b', 'a + b')
+        runner = CheckRunner({'syntax': syntax_check, 'tests': UNITTEST}, timeout=60)
+        results = {n: runner.run(n, self.ws) for n in ('syntax', 'tests')}
+        receipt = receipts.make_receipt(self.ws, runner, results)
+        self.assertTrue(receipts.matches_current(receipt, self.ws, runner))
+        runner.checks['tests'] = UNITTEST + ' -v'
+        self.assertFalse(receipts.matches_current(receipt, self.ws, runner))
+        runner.checks['tests'] = UNITTEST
+        self.ws.replace('calc.py', 'a + b', 'a + b + 0')
+        self.assertFalse(receipts.matches_current(receipt, self.ws, runner))
+
+    def test_finish_rejected_when_workspace_moves_after_checks(self):
+        self.ws.read('calc.py'); self.ws.replace('calc.py', 'a - b', 'a + b')
+        moved = []
+
+        def grader(ws, task, summary):  # runs after the checks, before the verdict
+            if not moved:
+                moved.append(1)
+                ws.replace('calc.py', 'a + b', 'a + b + 0')
+            return {'status': 'passed', 'evidence': 'ok'}
+
+        checks = CheckRunner({'syntax': syntax_check, 'tests': UNITTEST}, timeout=60)
+        agent = Agent(ScriptedClient([[('finish', {'summary': 'one'})], [('finish', {'summary': 'two'})]]),
+                      self.ws, checks=checks, acceptance_grader=grader,
+                      config=AgentConfig(require_approval=False, plan_first=False, baseline_checks=False))
+        result = agent.run('fix add')
+        names = [e['event'] for e in self.events(result)]
+        self.assertIn('stale_receipt', names)
+        self.assertEqual(result.status, 'verified')  # only after a second, current verification
+        self.assertEqual(result.receipt['workspace_sha'], receipts.workspace_fingerprint(self.ws))
+
+    def test_identical_failure_without_new_edit_stops_early(self):
+        result = self.agent([[('read_file', {'path': 'calc.py'})], [BREAK],
+                             [('finish', {'summary': 'a'})], [('finish', {'summary': 'b'})],
+                             [('finish', {'summary': 'c'})]], plan_first=False, finish_retries=5).run('fix add')
+        self.assertEqual(result.status, 'failed_checks')
+        self.assertEqual([e['event'] for e in self.events(result)].count('repeated_failure'), 1)
+
+    def test_a_changed_failure_is_new_evidence_and_still_retries(self):
+        result = self.agent([[('read_file', {'path': 'calc.py'})], [BREAK],
+                             [('finish', {'summary': 'a'})],
+                             [('replace_in_file', {'path': 'calc.py', 'old': 'a * b', 'new': 'a + b'})],
+                             [('finish', {'summary': 'b'})]], plan_first=False, finish_retries=2).run('fix add')
+        self.assertEqual(result.status, 'verified')

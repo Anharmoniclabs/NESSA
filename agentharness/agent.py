@@ -35,6 +35,7 @@ from . import online
 from . import efficient
 from . import config as project_config
 from . import telemetry
+from . import receipt as receipts
 
 SYSTEM_PROMPT = """You are an autonomous software engineer working through tools on a private copy \
 of a project. Nothing you do touches the user's original files; your changes become a patch they review.
@@ -181,6 +182,7 @@ class RunResult:
     evidence_dir: str = ""
     seconds: float = 0.0
     acceptance: dict | None = None
+    receipt: dict | None = None  # version-bound verification evidence from the last finish gate
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -285,6 +287,7 @@ class Agent:
         self.acceptance_result = None
         self.baseline: dict[str, CheckResult] = {}
         self.final: dict[str, CheckResult] = {}
+        self.receipt: receipts.VerificationReceipt | None = None
         self.last_tool = ""
         self.started = time.monotonic()
 
@@ -879,6 +882,11 @@ class Agent:
         for r in self.final.values():
             self.log("check", phase="verify", **{**r.to_dict(), "output": clip(r.output, 2000)})
         self.latest_checks.update({k: v.brief() for k,v in self.final.items()})
+        # Bind the evidence to the files it measured, before anything later can alter them.
+        previous = self.receipt
+        if changed:
+            self.receipt = receipts.make_receipt(self.ws, self.checks, self.final)
+            self.log("verification_receipt", **self.receipt.to_dict())
         acceptance = self._grade_acceptance(summary)
         if self.reviewer is not None:
             self._review_patch('final', self.ws.patch(), '\n'.join(self.latest_checks.values()))
@@ -897,11 +905,24 @@ class Agent:
         if not changed:
             return "no_change", "Finished with no changes."
         if not failing:
+            if not receipts.matches_current(self.receipt, self.ws, self.checks):
+                # Review or acceptance ran after the checks and the workspace moved: the evidence is stale.
+                self.log("stale_receipt", receipt=self.receipt.to_dict() if self.receipt else None)
+                if self.finish_attempts < self.config.finish_retries:
+                    self.finish_attempts += 1
+                    return None, ("Not accepted: files changed after verification ran, so the passing "
+                                  "evidence no longer applies. Call finish again to re-verify.")
+                return "unverified", "Accepted without current verification evidence."
             real = (all(r.status == 'passed' for r in self.final.values()) and
                     any(r.name != 'syntax' for r in self.final.values()))
             return ("verified" if real else "unverified"), "Accepted."
         report = "\n\n".join(f"{r.brief()}\n{clip(r.output, 3000)}" for r in failing)
         base = "; ".join(f"{r.brief()}" for r in self.baseline.values())
+        if receipts.repeats(previous, self.receipt):
+            self.log("repeated_failure", failing=self.receipt.failing)
+            return ("improved" if self._improved() else "failed_checks"), (
+                "Stopped: finish was retried with unchanged files and an identical failure; "
+                "no new evidence was produced.")
         if self.finish_attempts < self.config.finish_retries:
             self.finish_attempts += 1
             return None, (f"Not accepted: verification failed.\n{report}\n"
@@ -1106,7 +1127,7 @@ class Agent:
                            {"baseline": {k: v.brief() for k, v in self.baseline.items()},
                             "final": {k: v.brief() for k, v in self.final.items()}},
                            str(self.evidence_dir), round(time.monotonic() - self.started, 1),
-                           self.acceptance_result)
+                           self.acceptance_result, self.receipt.to_dict() if self.receipt else None)
         (self.evidence_dir / "patch.diff").write_text(patch)
         (self.evidence_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         (self.evidence_dir / "messages.json").write_text(json.dumps(self.messages, indent=1, default=str))
