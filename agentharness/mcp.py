@@ -175,7 +175,7 @@ class HttpTransport(_Transport):
         self._post({"jsonrpc": "2.0", "method": method, **({"params": params} if params else {})}, 10)
 
     def close(self):
-        pass
+        """Nothing to release: each HTTP request opens and closes its own connection."""
 
 
 class McpConnection:

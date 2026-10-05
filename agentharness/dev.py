@@ -12,6 +12,7 @@ when pid and start time both match, so a reused pid is never mistaken for ours.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import signal
@@ -21,6 +22,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 LOCAL_URL = re.compile(r"https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(/|$)")
 
@@ -247,12 +250,16 @@ class DevProcessManager:
         except (ProcessLookupError, PermissionError):
             pass
 
-    def stop_all(self) -> None:
+    def stop_all(self) -> dict[str, str]:
+        """Stop every managed process; return {name: error} for those that could not be stopped."""
+        failures: dict[str, str] = {}
         for name in list(self.processes):
             try:
                 self.stop(name)
-            except Exception:
-                pass
+            except Exception as exc:  # one stuck process must not keep the others running
+                failures[name] = f"{type(exc).__name__}: {exc}"
+                logger.warning("could not stop dev process %s: %s", name, failures[name])
+        return failures
 
     def _write_state(self) -> None:
         rows = []

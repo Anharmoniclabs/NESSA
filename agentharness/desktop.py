@@ -1,6 +1,7 @@
 """Threaded desktop chat controller; all GUI updates stay on the Tk main thread."""
 from __future__ import annotations
 import json
+import logging
 import threading
 import time
 import uuid
@@ -19,6 +20,8 @@ from .online import is_news_query
 from .session import atomic_json
 from .workspace import ToolError, Workspace
 from . import studio
+
+logger = logging.getLogger(__name__)
 from .session import SessionStore
 
 
@@ -302,8 +305,8 @@ class App:
             if (evidence / 'dev' / 'processes.json').exists():
                 try:
                     DevProcessManager(Workspace(evidence.parent), evidence).stop_all()
-                except Exception:
-                    pass
+                except Exception as exc:  # closing the window must not hang on one conversation
+                    logger.warning("dev process cleanup failed for %s: %s", evidence, exc)
 
     def snapshot(self, key):
         chat = self.chats[key]

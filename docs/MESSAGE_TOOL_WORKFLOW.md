@@ -126,11 +126,11 @@ disk are not rotated; operators should keep dev sessions bounded.
 | Managed asynchronous process polling | Implemented; process handles are names |
 | JavaScript execution cells | Not implemented; Python controller owns orchestration |
 | Arbitrary interactive stdin/PTY sessions | Not implemented |
-| Reattaching dev processes after parent restart | Not implemented; inspect surviving OS processes manually |
-| MCP, browser automation, external app/media connectors | Not implemented in this change; no fictitious tools advertised |
+| Reattaching dev processes after parent restart | Implemented; reattached processes report an `unknown` exit code |
+| MCP servers and Chrome DevTools adapter | Implemented via `[mcp.*]` in `agentharness.toml`; Chrome needs Node.js. No other connectors are advertised |
 | Autonomous worker swarm | Not added; repository contract requires one parent loop |
 | Native desktop chat UI | Implemented in `gui.py` / `desktop.py`, including fast-chat handoff |
-| OpenTelemetry exporter | Not implemented; JSON events are available |
+| OpenTelemetry export | Implemented: `trace.json` always, OTLP/JSON POST when `[telemetry] otlp_endpoint` is set |
 | Training or modifying model weights | Not performed |
 
 `--no-shell` disables generic command and dev-process launch tools. Registered

@@ -1003,6 +1003,69 @@ class Agent:
             elif self.no_progress == 0:
                 nudged = False
 
+    def _restore_session(self, message: str) -> None:
+        """Reload saved state for `run(resume=True)` and tell the model what changed since."""
+        saved = self.store.load()
+        self.user_messages = saved.get("user_messages", [])
+        self.chat_progress = saved.get('chat_progress', {})
+        self.chat_anchors = saved.get('chat_anchors', [])
+        if message and not re.fullmatch(r'\s*(continue|go on|keep going|next|resume)[.!?\s]*', message, re.I):
+            self.chat_progress = {}
+        if message:
+            self.user_messages.append(message)
+        self.task, self.plan, self.phase = saved['task'], saved['plan'], saved['phase']
+        self.messages = saved['messages']
+        self.steps, self.edit_count = saved['steps'], saved['edit_count']
+        self.active_skills = saved['active_skills']
+        self.skill_context = saved.get('skill_context', {})
+        if not self._lessons_provided:
+            self.lessons = saved.get('lessons', [])
+        self.latest_checks = saved['latest_checks']
+        self.last_observation = saved['last_observation']
+        self.elapsed = saved['elapsed']
+        self.finish_attempts = saved['finish_attempts']
+        self.acceptance_result = saved.get('acceptance_result')
+        self.baseline = {k: CheckResult(**v) for k,v in saved['baseline'].items()}
+        self.ws.journal = saved['journal']
+        self.ws._seen.clear()  # require fresh reads after restart
+        uncertain = self.store.uncertain()
+        self.uncertain_calls = {json.dumps([r['tool_name'], r['arguments']], sort_keys=True, default=str)
+                                for r in uncertain}
+        # Unanswered native calls from a crash are closed, never replayed.
+        for index in range(len(self.messages) - 1, -1, -1):
+            envelope = self.messages[index]
+            if envelope.get('tool_calls'):
+                following = self.messages[index + 1:]
+                answered = {m.get('tool_call_id') for m in following if m['role'] == 'tool'}
+                insert_at = index + 1
+                while insert_at < len(self.messages) and self.messages[insert_at]['role'] == 'tool':
+                    insert_at += 1
+                for call in envelope['tool_calls']:
+                    if call['id'] not in answered:
+                        self.messages.insert(insert_at, dict(role='tool', tool_call_id=call['id'],
+                            name=call['function']['name'],
+                            content='Outcome unknown after interruption; inspect evidence.'))
+                        insert_at += 1
+                break
+        if self.config.conversational:
+            if saved['status'] != 'awaiting_input':
+                self.task, self.plan, self.phase = message or self.task, None, 'chat'
+                self.steps, self.elapsed, self.finish_attempts = 0, 0.0, 0
+                self.baseline = {}
+            self._say('User message: ' + message)
+            if self.chat_progress.get('pending'):
+                self._say('Resume the unfinished answer from the saved continuation context. '
+                          'Keep its original request and established details. Continue after the last '
+                          'saved text without repeating earlier sections or restarting the story.')
+        else:
+            alive = (' Reattached running dev processes: ' + ', '.join(self.dev.reattached) + '.'
+                     if self.dev.reattached else '')
+            self._say('Resumed existing private workspace.' + alive +
+                      ' Read current files before editing. ' + (('User message: ' + message) if message else ''))
+        if uncertain:
+            self._say('Uncertain operations (do not repeat without inspection): ' +
+                      json.dumps([{'operation_id': r['operation_id'], 'tool': r['tool_name']} for r in uncertain]))
+
     def run(self, task: str, *, resume: bool = False, message: str = "") -> RunResult:
         self.started = time.monotonic()
         self.task = task
@@ -1012,66 +1075,7 @@ class Agent:
         plan, status, summary = None, "error", ""
         try:
             if resume:
-                saved = self.store.load()
-                self.user_messages = saved.get("user_messages", [])
-                self.chat_progress = saved.get('chat_progress', {})
-                self.chat_anchors = saved.get('chat_anchors', [])
-                if message and not re.fullmatch(r'\s*(continue|go on|keep going|next|resume)[.!?\s]*', message, re.I):
-                    self.chat_progress = {}
-                if message:
-                    self.user_messages.append(message)
-                self.task, self.plan, self.phase = saved['task'], saved['plan'], saved['phase']
-                self.messages = saved['messages']
-                self.steps, self.edit_count = saved['steps'], saved['edit_count']
-                self.active_skills = saved['active_skills']
-                self.skill_context = saved.get('skill_context', {})
-                if not self._lessons_provided:
-                    self.lessons = saved.get('lessons', [])
-                self.latest_checks = saved['latest_checks']
-                self.last_observation = saved['last_observation']
-                self.elapsed = saved['elapsed']
-                self.finish_attempts = saved['finish_attempts']
-                self.acceptance_result = saved.get('acceptance_result')
-                self.baseline = {k: CheckResult(**v) for k,v in saved['baseline'].items()}
-                self.ws.journal = saved['journal']
-                self.ws._seen.clear()  # require fresh reads after restart
-                uncertain = self.store.uncertain()
-                self.uncertain_calls = {json.dumps([r['tool_name'], r['arguments']], sort_keys=True, default=str)
-                                        for r in uncertain}
-                # Unanswered native calls from a crash are closed, never replayed.
-                for index in range(len(self.messages) - 1, -1, -1):
-                    envelope = self.messages[index]
-                    if envelope.get('tool_calls'):
-                        following = self.messages[index + 1:]
-                        answered = {m.get('tool_call_id') for m in following if m['role'] == 'tool'}
-                        insert_at = index + 1
-                        while insert_at < len(self.messages) and self.messages[insert_at]['role'] == 'tool':
-                            insert_at += 1
-                        for call in envelope['tool_calls']:
-                            if call['id'] not in answered:
-                                self.messages.insert(insert_at, dict(role='tool', tool_call_id=call['id'],
-                                    name=call['function']['name'],
-                                    content='Outcome unknown after interruption; inspect evidence.'))
-                                insert_at += 1
-                        break
-                if self.config.conversational:
-                    if saved['status'] != 'awaiting_input':
-                        self.task, self.plan, self.phase = message or self.task, None, 'chat'
-                        self.steps, self.elapsed, self.finish_attempts = 0, 0.0, 0
-                        self.baseline = {}
-                    self._say('User message: ' + message)
-                    if self.chat_progress.get('pending'):
-                        self._say('Resume the unfinished answer from the saved continuation context. '
-                                  'Keep its original request and established details. Continue after the last '
-                                  'saved text without repeating earlier sections or restarting the story.')
-                else:
-                    alive = (' Reattached running dev processes: ' + ', '.join(self.dev.reattached) + '.'
-                             if self.dev.reattached else '')
-                    self._say('Resumed existing private workspace.' + alive +
-                              ' Read current files before editing. ' + (('User message: ' + message) if message else ''))
-                if uncertain:
-                    self._say('Uncertain operations (do not repeat without inspection): ' +
-                              json.dumps([{'operation_id': r['operation_id'], 'tool': r['tool_name']} for r in uncertain]))
+                self._restore_session(message)
                 stop = None
             else:
                 if self.config.conversational:
@@ -1121,7 +1125,9 @@ class Agent:
         except KeyboardInterrupt:
             status, summary = 'cancelled', 'Interrupted; session saved for resume.'
         if not self.config.keep_dev_processes:
-            self.dev.stop_all()
+            stuck = self.dev.stop_all()
+            if stuck:
+                self.log("dev_stop_failed", processes=stuck)
         patch = self.ws.patch()
         result = RunResult(status, summary, patch, self.steps, self.ws.changed_files(), plan,
                            {"baseline": {k: v.brief() for k, v in self.baseline.items()},

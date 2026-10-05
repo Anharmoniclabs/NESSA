@@ -70,3 +70,23 @@ class Receipts(Base):
                              [('replace_in_file', {'path': 'calc.py', 'old': 'a * b', 'new': 'a + b'})],
                              [('finish', {'summary': 'b'})]], plan_first=False, finish_retries=2).run('fix add')
         self.assertEqual(result.status, 'verified')
+
+
+class DevCleanup(Base):
+    def test_stop_all_reports_failures_and_still_stops_the_rest(self):
+        from unittest.mock import patch
+        from agentharness.dev import DevProcessManager
+        manager = DevProcessManager(self.ws, self.tmp / 'evidence')
+        manager.processes = {'stuck': object(), 'fine': object()}
+        stopped = []
+
+        def stop(name):
+            if name == 'stuck':
+                raise PermissionError('not permitted')
+            stopped.append(name)
+
+        with patch.object(manager, 'stop', side_effect=stop):
+            failures = manager.stop_all()
+        self.assertEqual(stopped, ['fine'])
+        self.assertEqual(list(failures), ['stuck'])
+        self.assertIn('PermissionError', failures['stuck'])
