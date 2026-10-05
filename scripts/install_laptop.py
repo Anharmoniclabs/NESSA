@@ -78,7 +78,7 @@ esac
 '''
 
 
-def install(update_runtime=False, skip_acceptance=False):
+def preflight() -> None:
     if os.geteuid() == 0 or platform.system() != 'Linux' or platform.machine() != 'x86_64':
         raise RuntimeError('Run as a normal user on x86_64 Linux')
     if sys.version_info < (3, 10):
@@ -87,6 +87,109 @@ def install(update_runtime=False, skip_acceptance=False):
         if not shutil.which(name):
             raise RuntimeError(f'Missing {name}; run bash scripts/install_laptop.sh')
     run(['systemctl', '--user', 'show-environment'], stdout=subprocess.DEVNULL)
+
+
+def check_resources(root: Path, unit: Path) -> None:
+    # Reserve disk headroom for the model, archive, runtime and evidence.
+    if shutil.disk_usage(root).free < 16 * 1024**3:
+        raise RuntimeError('At least 16 GiB free disk space is required for installation')
+    if not unit.exists():
+        with socket.socket() as probe:
+            if probe.connect_ex(('127.0.0.1', 11435)) == 0:
+                raise RuntimeError('Port 11435 is already occupied; stop that server before installing NESSA')
+
+
+def install_runtime(root: Path, unit: Path, update_runtime: bool) -> Path:
+    """Download and unpack the Ollama runtime if absent (or when updating); return its binary."""
+    runtime = root / 'runtime'
+    ollama = runtime / 'bin/ollama'
+    if ollama.exists() and not update_runtime:
+        return ollama
+    with tempfile.TemporaryDirectory(prefix='runtime-', dir=root) as temp:
+        stage = Path(temp)
+        archive = stage / 'ollama.tar.zst'
+        run(['curl', '--fail', '--location', '--retry', '3', '--output', archive,
+             'https://ollama.com/download/ollama-linux-amd64.tar.zst'])
+        unpacked = stage / 'unpacked'
+        unpacked.mkdir()
+        run(['tar', '--zstd', '-xf', archive, '-C', unpacked])
+        if not (unpacked / 'bin/ollama').is_file():
+            raise RuntimeError('Downloaded runtime is missing bin/ollama')
+        if unit.exists():
+            run(['systemctl', '--user', 'stop', 'nessa-ollama.service'])
+        if runtime.exists():
+            runtime.rename(root / f'runtime-backup-{time.time_ns()}')
+        unpacked.rename(runtime)
+    return ollama
+
+
+def install_app(root: Path) -> Path:
+    """Copy the application into place, keeping the previous copy as a timestamped backup."""
+    app = root / 'app'
+    with tempfile.TemporaryDirectory(prefix='app-', dir=root) as temp:
+        stage = Path(temp) / 'app'
+        stage.mkdir()
+        for name in ('agentharness', 'scripts', 'configs', 'docs'):
+            shutil.copytree(SOURCE / name, stage / name, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+        shutil.copy2(SOURCE / 'README.md', stage / 'README.md')
+        if app.exists():
+            app.rename(root / f'app-backup-{time.time_ns()}')
+        stage.rename(app)
+    return app
+
+
+def start_model_server(unit: Path, ollama: Path, root: Path) -> None:
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(unit_text(ollama, root / 'models'))
+    run(['systemctl', '--user', 'daemon-reload'])
+    run(['systemctl', '--user', 'enable', '--now', 'nessa-ollama.service'])
+    for _ in range(30):
+        try:
+            get_json('/api/version')
+            return
+        except (OSError, ValueError):
+            time.sleep(1)
+    raise RuntimeError('Model server did not start; inspect journalctl --user -u nessa-ollama.service')
+
+
+def provision_model(ollama: Path, app: Path) -> None:
+    env = {**os.environ, 'OLLAMA_HOST': HOST}
+    run([ollama, 'pull', MODEL], env=env)
+    run([ollama, 'create', ALIAS, '-f', app / 'configs/Modelfile.lfm-i3'], env=env)
+
+
+def record_environment(report: dict) -> None:
+    report['runtime'] = get_json('/api/version')
+    report['models'] = get_json('/api/tags')
+    if Path('/proc/meminfo').exists():
+        report['memory_before_inference'] = Path('/proc/meminfo').read_text()
+    report['hardware'] = dict(cpu=platform.processor(), machine=platform.machine(), logical_cpus=os.cpu_count())
+
+
+def write_launcher(app: Path) -> Path:
+    bin_dir = Path.home() / '.local/bin'
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    launcher = bin_dir / 'nessa'
+    if launcher.exists() and 'nessa-ollama.service' not in launcher.read_text(errors='replace'):
+        raise RuntimeError(f'{launcher} already exists and is not a NESSA launcher; refusing overwrite')
+    launcher.write_text(launcher_text(app, sys.executable))
+    launcher.chmod(0o755)
+    return launcher
+
+
+def run_acceptance(root: Path, app: Path, report: dict, environment: dict) -> None:
+    """Real inference is the final gate. Never mark a skipped or failed test ready."""
+    acceptance = root / 'acceptance' / str(time.time_ns())
+    report['acceptance_dir'] = str(acceptance)
+    run([sys.executable, app / 'scripts/smoke_local.py', '--profile', PROFILE,
+         '--base-url', BASE_URL, '--out', acceptance], cwd=app, env=environment)
+    report['acceptance_passed'] = json.loads((acceptance / 'acceptance.json').read_text())['passed'] is True
+    if not report['acceptance_passed']:
+        raise RuntimeError('Real-model acceptance did not pass')
+
+
+def install(update_runtime=False, skip_acceptance=False):
+    preflight()
     root = Path.home() / '.local/share/nessa'
     root.mkdir(parents=True, exist_ok=True)
     report_path = root / 'installation.json'
@@ -94,88 +197,24 @@ def install(update_runtime=False, skip_acceptance=False):
                   base_url=BASE_URL, started_at=time.time(), acceptance_passed=False)
     report_path.write_text(json.dumps(report, indent=2))
     try:
-        # Reserve disk headroom for the model, archive, runtime and evidence.
-        if shutil.disk_usage(root).free < 16 * 1024**3:
-            raise RuntimeError('At least 16 GiB free disk space is required for installation')
         unit = Path.home() / '.config/systemd/user/nessa-ollama.service'
-        if not unit.exists():
-            with socket.socket() as probe:
-                if probe.connect_ex(('127.0.0.1', 11435)) == 0:
-                    raise RuntimeError('Port 11435 is already occupied; stop that server before installing NESSA')
-        runtime = root / 'runtime'
-        ollama = runtime / 'bin/ollama'
-        if not ollama.exists() or update_runtime:
-            with tempfile.TemporaryDirectory(prefix='runtime-', dir=root) as temp:
-                stage = Path(temp)
-                archive = stage / 'ollama.tar.zst'
-                run(['curl', '--fail', '--location', '--retry', '3', '--output', archive,
-                     'https://ollama.com/download/ollama-linux-amd64.tar.zst'])
-                unpacked = stage / 'unpacked'
-                unpacked.mkdir()
-                run(['tar', '--zstd', '-xf', archive, '-C', unpacked])
-                if not (unpacked / 'bin/ollama').is_file():
-                    raise RuntimeError('Downloaded runtime is missing bin/ollama')
-                if unit.exists():
-                    run(['systemctl', '--user', 'stop', 'nessa-ollama.service'])
-                if runtime.exists():
-                    runtime.rename(root / f'runtime-backup-{time.time_ns()}')
-                unpacked.rename(runtime)
-        app = root / 'app'
-        with tempfile.TemporaryDirectory(prefix='app-', dir=root) as temp:
-            stage = Path(temp) / 'app'
-            stage.mkdir()
-            for name in ('agentharness', 'scripts', 'configs', 'docs'):
-                shutil.copytree(SOURCE / name, stage / name,
-                                ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
-            shutil.copy2(SOURCE / 'README.md', stage / 'README.md')
-            if app.exists():
-                app.rename(root / f'app-backup-{time.time_ns()}')
-            stage.rename(app)
-        unit.parent.mkdir(parents=True, exist_ok=True)
-        unit.write_text(unit_text(ollama, root / 'models'))
-        run(['systemctl', '--user', 'daemon-reload'])
-        run(['systemctl', '--user', 'enable', '--now', 'nessa-ollama.service'])
-        for attempt in range(30):
-            try:
-                get_json('/api/version')
-                break
-            except (OSError, ValueError):
-                time.sleep(1)
-        else:
-            raise RuntimeError('Model server did not start; inspect journalctl --user -u nessa-ollama.service')
-        env = {**os.environ, 'OLLAMA_HOST': HOST}
-        run([ollama, 'pull', MODEL], env=env)
-        run([ollama, 'create', ALIAS, '-f', app / 'configs/Modelfile.lfm-i3'], env=env)
-        report['runtime'] = get_json('/api/version')
-        report['models'] = get_json('/api/tags')
-        if Path('/proc/meminfo').exists():
-            report['memory_before_inference'] = Path('/proc/meminfo').read_text()
-        report['hardware'] = dict(cpu=platform.processor(), machine=platform.machine(),
-                                  logical_cpus=os.cpu_count())
-        bin_dir = Path.home() / '.local/bin'
-        bin_dir.mkdir(parents=True, exist_ok=True)
-        launcher = bin_dir / 'nessa'
-        if launcher.exists() and 'nessa-ollama.service' not in launcher.read_text(errors='replace'):
-            raise RuntimeError(f'{launcher} already exists and is not a NESSA launcher; refusing overwrite')
-        launcher.write_text(launcher_text(app, sys.executable))
-        launcher.chmod(0o755)
+        check_resources(root, unit)
+        ollama = install_runtime(root, unit, update_runtime)
+        app = install_app(root)
+        start_model_server(unit, ollama, root)
+        provision_model(ollama, app)
+        record_environment(report)
+        launcher = write_launcher(app)
         environment = {**os.environ, 'PYTHONPATH': str(app)}
         run([sys.executable, '-m', 'agentharness', 'doctor', '--profile', PROFILE,
              '--base-url', BASE_URL], cwd=app, env=environment)
-        # Real inference is the final gate. Never mark a skipped or failed test ready.
         if not skip_acceptance:
-            acceptance = root / 'acceptance' / str(time.time_ns())
-            report['acceptance_dir'] = str(acceptance)
-            run([sys.executable, app / 'scripts/smoke_local.py', '--profile', PROFILE,
-                 '--base-url', BASE_URL, '--out', acceptance], cwd=app, env=environment)
-            report['acceptance_passed'] = json.loads((acceptance / 'acceptance.json').read_text())['passed'] is True
-            if not report['acceptance_passed']:
-                raise RuntimeError('Real-model acceptance did not pass')
+            run_acceptance(root, app, report, environment)
         report['status'] = 'ready' if report['acceptance_passed'] else 'installed_unverified'
         print(f"\n{report['status'].upper()}: {launcher} chat /path/to/project")
         print(f'Report: {report_path}')
         return 0
-    except Exception as exc:
+    except Exception as exc:  # any stage failure is recorded in the report, never reported as ready
         report.update(status='failed', error=str(exc))
         print(f'Installation not ready: {exc}', file=sys.stderr)
         return 1

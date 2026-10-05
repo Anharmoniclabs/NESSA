@@ -117,76 +117,87 @@ class ArticleMetadata(HTMLParser):
             self.description=attrs.get('content','')
 
 
-def news_search(query, days=7):
-    if not 1 <= days <= 30:
-        raise ToolError('News window must be 1–30 days.')
-    terms=topic_terms(query)
-    topic=' '.join('artificial intelligence' if t=='ai' else t for t in terms)
-    if not topic:
-        topic='top news'
-    url='https://www.bing.com/news/search?format=rss&sortby=Date&q=' + urllib.parse.quote(topic)
-    raw,_=fetch(url)
+GENERIC_TITLE_WORDS = {'ai', 'the', 'new', 'how', 'why', 'what', 'latest', 'inside', 'report'}
+
+
+def _news_topic(query: str) -> str:
+    terms = topic_terms(query)
+    topic = ' '.join('artificial intelligence' if t == 'ai' else t for t in terms)
+    return topic or 'top news'
+
+
+def _feed_items(topic: str) -> list:
+    raw, _ = fetch('https://www.bing.com/news/search?format=rss&sortby=Date&q=' + urllib.parse.quote(topic))
     try:
-        items=ET.fromstring(raw).findall('./channel/item')
+        return ET.fromstring(raw).findall('./channel/item')
     except ET.ParseError as exc:
         raise ToolError('News provider returned unreadable results.') from exc
-    now=datetime.now(timezone.utc)
-    candidates=[]
-    seen=set()
-    for item in items:
-        title=item.findtext('title','').strip()
-        snippet=html_to_text(item.findtext('description','')).strip()
-        link=item.findtext('link','')
-        parts=urllib.parse.urlsplit(link)
-        if parts.hostname in ('www.bing.com','bing.com') and parts.path.endswith('/apiclick.aspx'):
-            link=urllib.parse.parse_qs(parts.query).get('url',[link])[0]
-        parts=urllib.parse.urlsplit(link)
-        if parts.scheme not in ('http','https') or parts.path in ('','/') or link in seen:
-            continue
-        if not relevant(query,title+' '+snippet):
-            continue
-        try:
-            published=parsedate_to_datetime(item.findtext('pubDate',''))
-            if published.tzinfo is None: published=published.replace(tzinfo=timezone.utc)
-        except (ValueError, TypeError):
-            continue
-        if not now-timedelta(days=days) <= published <= now+timedelta(minutes=10):
-            continue
-        seen.add(link)
-        candidates.append({'title':title[:250], 'url':link, 'published':published.isoformat(),
-                           'publisher':parts.hostname, 'snippet':snippet[:600]})
-    candidates.sort(key=lambda r:r['published'],reverse=True)
-    if not candidates:
-        if days < 7:
-            expanded = json.loads(news_search(query, 7))
-            expanded['requested_window_days'] = days
-            return json.dumps(expanded, ensure_ascii=False)
-        raise ToolError(f'No relevant dated articles found in the last {days} days for {topic!r}. Do not substitute generic news sites.')
-    groups=[]
+
+
+def _article_url(item) -> str:
+    """The publisher link, unwrapping Bing's click-tracking redirect."""
+    link = item.findtext('link', '')
+    parts = urllib.parse.urlsplit(link)
+    if parts.hostname in ('www.bing.com', 'bing.com') and parts.path.endswith('/apiclick.aspx'):
+        link = urllib.parse.parse_qs(parts.query).get('url', [link])[0]
+    return link
+
+
+def _news_candidate(item, query: str, now: datetime, days: int, seen: set) -> dict | None:
+    """One feed item as a result row, or None when it is off-topic, undated, outside the window or a repeat."""
+    title = item.findtext('title', '').strip()
+    snippet = html_to_text(item.findtext('description', '')).strip()
+    link = _article_url(item)
+    parts = urllib.parse.urlsplit(link)
+    if parts.scheme not in ('http', 'https') or parts.path in ('', '/') or link in seen:
+        return None
+    if not relevant(query, title + ' ' + snippet):
+        return None
+    try:
+        published = parsedate_to_datetime(item.findtext('pubDate', ''))
+        if published.tzinfo is None:
+            published = published.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+    if not now - timedelta(days=days) <= published <= now + timedelta(minutes=10):
+        return None
+    seen.add(link)
+    return {'title': title[:250], 'url': link, 'published': published.isoformat(),
+            'publisher': parts.hostname, 'snippet': snippet[:600]}
+
+
+def _same_story(row: dict, prior: dict) -> bool:
+    words = re.findall(r'[a-z0-9]+', row['title'].lower())
+    prior_words = re.findall(r'[a-z0-9]+', prior['title'].lower())
+    shares_subject = bool(words and prior_words and
+                          ((words[0] not in GENERIC_TITLE_WORDS and words[0] in prior_words) or
+                           (prior_words[0] not in GENERIC_TITLE_WORDS and prior_words[0] in words)))
+    return shares_subject and difflib.SequenceMatcher(None, row['title'].lower(),
+                                                      prior['title'].lower()).ratio() >= .45
+
+
+def _group_related(candidates: list) -> list:
+    """Fold near-duplicate headlines about one story under the first (newest) report."""
+    groups: list = []
     for row in candidates:
-        title_words=re.findall(r'[a-z0-9]+',row['title'].lower())
-        related=None
-        for prior in groups:
-            prior_words=re.findall(r'[a-z0-9]+',prior['title'].lower())
-            generic={'ai','the','new','how','why','what','latest','inside','report'}
-            same_subject=bool(title_words and prior_words and
-                ((title_words[0] not in generic and title_words[0] in prior_words) or
-                 (prior_words[0] not in generic and prior_words[0] in title_words)))
-            if same_subject and difflib.SequenceMatcher(None,row['title'].lower(),prior['title'].lower()).ratio() >= .45:
-                related=prior
-                break
-        if related is not None:
-            related.setdefault('related_reports',[]).append({'title':row['title'],'url':row['url']})
-        else:
+        related = next((prior for prior in groups if _same_story(row, prior)), None)
+        if related is None:
             groups.append(row)
-    results=groups[:3]
+        else:
+            related.setdefault('related_reports', []).append({'title': row['title'], 'url': row['url']})
+    return groups
+
+
+def _attach_page_evidence(results: list, query: str) -> None:
+    """Fetch each article and keep its description only when it matches the topic."""
     def retrieve(row):
         try:
-            text,kind=fetch(row['url'])
+            text, kind = fetch(row['url'])
             if 'html' not in kind:
                 raise ToolError('Article did not return HTML')
-            parser=ArticleMetadata();parser.feed(text)
-            excerpt=parser.description
+            parser = ArticleMetadata()
+            parser.feed(text)
+            excerpt = parser.description
             if not excerpt or not relevant(query, excerpt):
                 raise ToolError('Fetched page does not match the requested topic')
             row.update(page_status='fetched', page_excerpt=excerpt[:600])
@@ -194,8 +205,28 @@ def news_search(query, days=7):
             row.update(page_status='unavailable', page_error=str(exc)[:150])
     with ThreadPoolExecutor(max_workers=3) as pool:
         list(pool.map(retrieve, results))
-    return json.dumps({'kind':'news','query':query,'effective_query':topic,'window_days':days,
-                       'retrieved':now.isoformat(),'results':results},ensure_ascii=False)
+
+
+def news_search(query, days=7):
+    if not 1 <= days <= 30:
+        raise ToolError('News window must be 1–30 days.')
+    topic = _news_topic(query)
+    now = datetime.now(timezone.utc)
+    seen: set = set()
+    candidates = [row for item in _feed_items(topic)
+                  if (row := _news_candidate(item, query, now, days, seen)) is not None]
+    candidates.sort(key=lambda r: r['published'], reverse=True)
+    if not candidates:
+        if days < 7:
+            expanded = json.loads(news_search(query, 7))
+            expanded['requested_window_days'] = days
+            return json.dumps(expanded, ensure_ascii=False)
+        raise ToolError(f'No relevant dated articles found in the last {days} days for {topic!r}. '
+                        'Do not substitute generic news sites.')
+    results = _group_related(candidates)[:3]
+    _attach_page_evidence(results, query)
+    return json.dumps({'kind': 'news', 'query': query, 'effective_query': topic, 'window_days': days,
+                       'retrieved': now.isoformat(), 'results': results}, ensure_ascii=False)
 
 
 def render_news(data):
