@@ -941,6 +941,8 @@ class Agent:
         if changed:
             self.receipt = receipts.make_receipt(self.ws, self.checks, self.final)
             self.log("verification_receipt", **self.receipt.to_dict())
+        else:
+            self.receipt = None  # nothing changed, so no earlier receipt describes the current files
         acceptance = self._grade_acceptance(summary)
         if self.reviewer is not None:
             self._review_patch('final', self.ws.patch(), '\n'.join(self.latest_checks.values()))

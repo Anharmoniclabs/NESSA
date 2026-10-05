@@ -157,7 +157,6 @@ class Window:
         self.chat.tag_configure('code', background=PANEL, foreground='#d3cbe1', font=('DejaVu Sans Mono', 10), lmargin1=16, lmargin2=16, spacing1=4, spacing3=4)
 
     def _build_hero(self):
-        root = self.root
         self.hero = tk.Frame(self.content, bg=BG)
         self.hero.grid(row=1, column=0, sticky='nsew')
         intro = tk.Frame(self.hero, bg=BG)
@@ -171,7 +170,6 @@ class Window:
             ttk.Button(suggestions, text=title, command=lambda p=prompt: self.suggest(p)).pack(side='left', padx=4)
 
     def _build_approval(self):
-        root = self.root
         self.approval = ttk.Frame(self.content, padding=(0, 10))
         self.approval.columnconfigure(0, weight=1)
         self.plan_label = ttk.Label(self.approval, wraplength=620)
@@ -182,7 +180,6 @@ class Window:
         self.status.grid(row=4, column=0, sticky='w', padx=10, pady=(6, 8))
 
     def _build_composer(self):
-        root = self.root
         compose = RoundedSurface(self.content, height=144)
         compose.grid(row=5, column=0, sticky='ew')
         compose.body.columnconfigure(0, weight=1)

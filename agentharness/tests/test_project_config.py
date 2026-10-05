@@ -6,13 +6,12 @@ import shutil
 import sys
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 
 from agentharness.__main__ import _config, main as cli_main
 from agentharness.agent import Agent, AgentConfig
-from agentharness.checks import CheckRunner, detect_checks
+from agentharness.checks import detect_checks
 from agentharness.config import load
 from agentharness.dev import DevProcessManager
 from agentharness.mcp import McpBus, shared_bus
@@ -195,7 +194,6 @@ class HealthHandler(http.server.BaseHTTPRequestHandler):
 class DevProcessTests(Base):
     def test_preset_start_health_and_reattach_after_restart(self):
         ws = Workspace.create(self.proj, self.tmp / "work")
-        cfg = load(self.proj)
         server = http.server.HTTPServer(("127.0.0.1", 0), HealthHandler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)

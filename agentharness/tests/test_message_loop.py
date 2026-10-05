@@ -1,10 +1,7 @@
 """Behavioral tests: feedback, restart, context bounds and honest completion."""
 import json
-import subprocess
 import sys
-import time
 import unittest
-from pathlib import Path
 
 from agentharness.agent import Agent, AgentConfig
 from agentharness.checks import CheckResult, CheckRunner, syntax_check

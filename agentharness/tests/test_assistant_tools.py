@@ -1,9 +1,7 @@
 import json
-from pathlib import Path
 from unittest.mock import patch
 
 from agentharness.agent import Agent, AgentConfig
-from agentharness.llm import ChatClient, Reply
 from agentharness.tests.test_agent import Base, ScriptedClient
 from agentharness.tools import _local_path
 from agentharness.workspace import ToolError

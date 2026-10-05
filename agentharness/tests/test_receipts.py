@@ -65,6 +65,13 @@ class Receipts(Base):
         self.assertEqual(result.status, 'failed_checks')
         self.assertEqual([e['event'] for e in self.events(result)].count('repeated_failure'), 1)
 
+    def test_undoing_every_change_clears_the_stale_receipt(self):
+        result = self.agent([[('read_file', {'path': 'calc.py'})], [BREAK], [('finish', {'summary': 'a'})],
+                             [('undo_file', {'path': 'calc.py'})], [('finish', {'summary': 'b'})]],
+                            plan_first=False, finish_retries=2).run('fix add')
+        self.assertEqual(result.status, 'no_change')
+        self.assertIsNone(result.receipt)
+
     def test_a_changed_failure_is_new_evidence_and_still_retries(self):
         result = self.agent([[('read_file', {'path': 'calc.py'})], [BREAK],
                              [('finish', {'summary': 'a'})],

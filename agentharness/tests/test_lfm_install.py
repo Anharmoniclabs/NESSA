@@ -3,9 +3,7 @@ import argparse
 import importlib.util
 import io
 import json
-import os
 import subprocess
-import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout

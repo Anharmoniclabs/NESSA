@@ -1,11 +1,9 @@
 """Browser evidence: parsing real adapter output, capture/replay verdicts, agent wiring."""
 import json
-import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 
 from agentharness import browser, report
 from agentharness.agent import Agent, AgentConfig
