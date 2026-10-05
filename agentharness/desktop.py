@@ -13,6 +13,7 @@ from .checks import CheckRunner, detect_checks
 from .dev import DevProcessManager
 from .llm import ChatClient
 from .memory import ConversationMemory, LessonStore
+from .recall import RecallIndex
 from .reviewer import Reviewer
 from .profiles import PROFILES
 from .project_discovery import find_project, overview
@@ -234,6 +235,14 @@ class App:
         self._answer(chat, overview(matches[0]))
         return True
 
+    @staticmethod
+    def _recall(chat, ws: Workspace) -> RecallIndex | None:
+        """Project chats can recall lessons and earlier runs; unattached chats have no project history."""
+        project = chat.data.get('project')
+        if not project:
+            return None
+        return RecallIndex.for_project(Path(project), LessonStore().all(project), exclude=ws.work_dir / 'evidence')
+
     def _run_agent(self, chat, message: str, context: str) -> None:
         profile = PROFILES['lfm-i3-12gb']
         client = ChatClient(self.base_url, self.model, max_tokens=profile['max_tokens'],
@@ -259,7 +268,8 @@ class App:
                                        max_tokens=512)) if self.review_model else None
         result = Agent(client, ws, config=cfg, checks=CheckRunner(detect_checks(ws.repo)),
                        approver=chat.approve, on_event=chat.event, chat_client=fast,
-                       lessons=lessons, reviewer=reviewer, conversation_context=context).run(
+                       lessons=lessons, reviewer=reviewer, conversation_context=context,
+                       recall=self._recall(chat, ws)).run(
                            task, resume=resume, message=message if resume else '')
         self._record_result(chat, result)
 

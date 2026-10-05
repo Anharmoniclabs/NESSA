@@ -36,6 +36,7 @@ from . import efficient
 from . import config as project_config
 from . import telemetry
 from . import receipt as receipts
+from .recall import RecallIndex, tool as recall_tool
 
 SYSTEM_PROMPT = """You are an autonomous software engineer working through tools on a private copy \
 of a project. Nothing you do touches the user's original files; your changes become a patch they review.
@@ -250,7 +251,8 @@ class Agent:
                  skills: SkillRegistry | None = None,
                  project_instructions: ProjectInstructions | None = None, on_event=None,
                  chat_client=None, conversation_context: str = '',
-                 acceptance_grader: Callable[[Workspace, str, str], dict] | None = None):
+                 acceptance_grader: Callable[[Workspace, str, str], dict] | None = None,
+                 recall: RecallIndex | None = None):
         self.client = client
         self.chat_client = chat_client
         self.conversation_context = conversation_context
@@ -291,6 +293,9 @@ class Agent:
             from .mcp import shared_bus
             self.mcp = shared_bus(self.project_config.mcp, ws.repo, self.evidence_dir / 'mcp')
             self.tools.update({k: v for k, v in self.mcp.tools().items() if k not in self.tools})
+        self.recall = recall
+        if recall is not None:
+            self.tools['recall'] = recall_tool()
         self.active_skills: list[str] = []
         self.skill_context: dict[str, dict] = {}
         self.edit_count = 0

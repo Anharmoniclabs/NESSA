@@ -28,6 +28,7 @@ from .skills import SkillRegistry
 from .workspace import ToolError, Workspace
 from .profiles import PROFILES, apply_profile
 from . import promote
+from .recall import RecallIndex
 from .promote import PromotionError
 from .session import SessionStore
 
@@ -93,6 +94,11 @@ def print_event(event, data):
         print(f"[context] {data['before']} -> {data['after']} messages", flush=True)
 
 
+def _recall(project: Path, ws: Workspace) -> RecallIndex:
+    """Lessons and earlier runs of this project, excluding the run being written now."""
+    return RecallIndex.for_project(project, LessonStore().all(str(project)), exclude=ws.work_dir / "evidence")
+
+
 def cmd_run(a) -> int:
     project = Path(a.project).resolve()
     task = Path(a.task_file).read_text() if a.task_file else a.task
@@ -114,7 +120,7 @@ def cmd_run(a) -> int:
         reviewer = Reviewer(review_client)
     agent = Agent(_client(a), ws, config=_config(a, require_approval=not a.auto_approve),
                   checks=CheckRunner(checks), approver=None if a.auto_approve else cli_approver,
-                  lessons=lessons, reviewer=reviewer,
+                  lessons=lessons, reviewer=reviewer, recall=_recall(project, ws),
                   on_event=print_event if a.progress else None)
     print(f"Working copy: {ws.repo}\nChecks: {', '.join(checks)}")
     result = agent.run(task)
@@ -181,7 +187,7 @@ def cmd_chat(a) -> int:
         agent = Agent(client, ws, config=cfg, checks=checks,
                       approver=cli_approver if cfg.require_approval else None,
                       on_event=print_event, reviewer=reviewer,
-                      lessons=LessonStore().relevant(str(project), message))
+                      lessons=LessonStore().relevant(str(project), message), recall=_recall(project, ws))
         result = last = agent.run(task, resume=resume, message=message if resume else '')
         print(f'nessa> {result.summary}', flush=True)
         if result.status not in ('answered', 'awaiting_input'):
