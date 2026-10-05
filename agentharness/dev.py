@@ -128,9 +128,12 @@ class DevProcessManager:
         item = DevProcess(name, list(argv), self.workspace.rel(workdir), proc.pid,
                           str(log_path), time.time(), proc, self._identity(proc.pid))
         self.processes[name] = item
+        code = proc.poll()
+        if code is not None:
+            item.returncode = code
         self._write_state()
-        if proc.poll() is not None:
-            return f"{name}: exited immediately with code {proc.returncode}\n{self.logs(name)}"
+        if code is not None:
+            return f"{name}: exited immediately with code {code}\n{self.logs(name)}"
         return f"{name}: running pid={proc.pid} cwd={item.cwd} log={log_path}"
 
     def status(self, name: str | None = None) -> str:
@@ -231,6 +234,10 @@ class DevProcessManager:
     def _write_state(self) -> None:
         rows = []
         for item in self.processes.values():
+            if item.proc is not None:
+                code = item.proc.poll()
+                if code is not None:
+                    item.returncode = code
             rows.append({
                 "name": item.name,
                 "argv": item.argv,
@@ -239,6 +246,6 @@ class DevProcessManager:
                 "log_path": item.log_path,
                 "started_at": item.started_at,
                 "identity": item.identity,
-                "returncode": item.proc.poll() if item.proc is not None else item.returncode,
+                "returncode": item.returncode,
             })
         atomic_json(self.state_path, {"version": 2, "processes": rows})
