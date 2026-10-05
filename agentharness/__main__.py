@@ -16,11 +16,13 @@ import shutil
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 from . import extract as ex
 from .agent import Agent, AgentConfig
 from .checks import CheckResult, CheckRunner, detect_checks
+from . import recurrence as rec
 from .llm import ChatClient, ModelError
 from .memory import LessonStore
 from .reviewer import Reviewer
@@ -33,10 +35,26 @@ DEFAULT_URL = os.environ.get("AGENT_BASE_URL", "http://127.0.0.1:11434/v1")  # O
 DEFAULT_MODEL = os.environ.get("AGENT_MODEL")
 
 
-def _client(a) -> ChatClient:
+def _recurrence(a, saved=None):
+    """Native-recurrence settings from flags; a resumed session keeps (and may not change) its own."""
+    requested = rec.from_cli(a.recurrence_steps, a.recurrence_config)
+    if saved is None:
+        return requested
+    previous = rec.RecurrenceConfig.from_dict(saved) if saved.get('enabled') else None
+    if requested is None:
+        return previous
+    if previous is None and not requested.enabled:
+        return None
+    if previous is None or requested.to_dict() != previous.to_dict():
+        raise rec.RecurrenceError('Recurrence settings differ from the saved session; '
+                                  'resume with the original settings (or none) to keep budgets consistent')
+    return previous
+
+
+def _client(a, saved_recurrence=None) -> ChatClient:
     return ChatClient(a.base_url, a.model, max_tokens=a.max_tokens, allow_remote=a.allow_remote,
                       temperature=a.temperature if a.temperature is not None else 0.0,
-                      reasoning_effort=a.reasoning_effort)
+                      reasoning_effort=a.reasoning_effort, recurrence=_recurrence(a, saved_recurrence))
 
 
 def _config(a, **over) -> AgentConfig:
@@ -98,6 +116,7 @@ def cmd_run(a) -> int:
         sys.exit("Give a task string or --task-file.")
     work = Path(a.work or Path.home() / ".agentharness" / "runs" /
                 f"{project.name}-{time.strftime('%Y%m%d-%H%M%S')}")
+    client = _client(a)   # validates recurrence settings before a workspace is created
     ws = Workspace.create(project, work)
     checks = detect_checks(ws.repo)
     for spec in a.check:
@@ -110,7 +129,7 @@ def cmd_run(a) -> int:
         review_client = ChatClient(review_url, a.review_model, max_tokens=min(a.max_tokens, 4096),
                                    allow_remote=a.allow_remote)
         reviewer = Reviewer(review_client)
-    agent = Agent(_client(a), ws, config=_config(a, require_approval=not a.auto_approve),
+    agent = Agent(client, ws, config=_config(a, require_approval=not a.auto_approve),
                   checks=CheckRunner(checks), approver=None if a.auto_approve else cli_approver,
                   lessons=lessons, reviewer=reviewer,
                   on_event=print_event if a.progress else None)
@@ -145,10 +164,10 @@ def cmd_chat(a) -> int:
     project = Path(a.project).resolve()
     work = Path(a.work or Path.home() / '.agentharness' / 'runs' /
                 f"{project.name}-{time.time_ns()}")
+    client = _client(a)
     ws = Workspace.create(project, work)
     checks = CheckRunner(detect_checks(ws.repo))
     cfg = _config(a, require_approval=not a.auto_approve, conversational=True)
-    client = _client(a)
     reviewer = Reviewer(ChatClient(a.review_base_url or a.base_url, a.review_model,
                         max_tokens=min(a.max_tokens, 4096), allow_remote=a.allow_remote)) if a.review_model else None
     task, resume, last = '', False, None
@@ -205,11 +224,32 @@ def cmd_resume(a) -> int:
     for name in saved.get('check_names', []):
         if name not in checks:
             checks[name] = lambda ws, name=name: CheckResult(name, 'error', output='Check implementation unavailable after restart')
-    agent = Agent(_client(a), ws, config=cfg, checks=CheckRunner(checks),
+    agent = Agent(_client(a, saved.get('recurrence') or {}), ws, config=cfg, checks=CheckRunner(checks),
                   approver=cli_approver if cfg.require_approval else None)
     result = agent.run(saved['task'], resume=True, message=a.message)
     print(f'Status: {result.status}\n{result.summary}\nPatch + evidence: {result.evidence_dir}')
     return 0 if result.status in ('verified', 'unverified', 'no_change', 'answered', 'awaiting_input') else 1
+
+
+def cmd_recurrence_plan(a) -> int:
+    try:
+        data = tomllib.loads(Path(a.config).read_text(encoding='utf-8'))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise rec.RecurrenceError(f'cannot read {a.config}: {exc}') from exc
+    cfg = rec.RecurrenceConfig.from_dict(data.get('recurrence', {}))
+    print(json.dumps(rec.plan_arms(data, cfg), indent=2))
+    return 0
+
+
+def cmd_recurrence_report(a) -> int:
+    try:
+        arms = json.loads(Path(a.results).read_text(encoding='utf-8'))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise rec.RecurrenceError(f'cannot read {a.results}: {exc}') from exc
+    if not isinstance(arms, dict) or not all(isinstance(r, list) for r in arms.values()):
+        raise rec.RecurrenceError('results must map arm names to lists of rows')
+    print(json.dumps({name: rec.summarize_arm(rows) for name, rows in arms.items()}, indent=2))
+    return 0
 
 
 def cmd_batch(a) -> int:
@@ -318,6 +358,10 @@ def main(argv=None) -> int:
         sp.add_argument("--reasoning-effort", choices=("none", "low", "medium", "high"), default=None)
         sp.add_argument("--max-tokens", type=int, default=None)
         sp.add_argument("--allow-remote", action="store_true", help="permit a non-local model server")
+        sp.add_argument("--recurrence-steps", type=int, default=None,
+                        help="native backend recurrence steps per request (needs --recurrence-config)")
+        sp.add_argument("--recurrence-config", default=None, metavar="TOML",
+                        help="file with [recurrence]: explicit backend capability + adapter declaration")
 
     def agent_args(sp):
         model_args(sp)
@@ -416,10 +460,22 @@ def main(argv=None) -> int:
     model_args(d)
     d.set_defaults(fn=cmd_doctor)
 
+    rp = sub.add_parser("recurrence-plan", help="list native-recurrence evaluation arms with matched budgets")
+    rp.add_argument("config", help="TOML with [recurrence] and [evaluation] (see configs/recurrence-eval.example.toml)")
+    rp.set_defaults(fn=cmd_recurrence_plan)
+
+    rr = sub.add_parser("recurrence-report", help="summarize per-arm results (JSON: {arm: [row, ...]})")
+    rr.add_argument("results")
+    rr.set_defaults(fn=cmd_recurrence_report)
+
     a = p.parse_args(argv)
     if hasattr(a, "profile"):
         apply_profile(a)
-    return a.fn(a)
+    try:
+        return a.fn(a)
+    except rec.RecurrenceError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

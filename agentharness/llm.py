@@ -14,6 +14,8 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 
+from . import recurrence as rec
+
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
@@ -80,13 +82,14 @@ class Reply:
     reasoning: str | None = None
     prompt_tokens: int = 0
     finish_reason: str | None = None
+    recurrence: dict | None = None   # native recurrence record; None when not requested
 
 
 class ChatClient:
     def __init__(self, base_url: str, model: str, *, temperature: float = 0.0,
                  max_tokens: int = 4096, timeout: float = 900, retries: int = 3,
                  allow_remote: bool = False, api_key: str = "local", reasoning_effort: str | None = None,
-                 on_delta=None):
+                 on_delta=None, recurrence: rec.RecurrenceConfig | None = None):
         host = urllib.parse.urlparse(base_url).hostname
         if host not in LOCAL_HOSTS and not allow_remote:
             raise ValueError(f"Refusing non-local model server {host!r}; pass allow_remote=True to override.")
@@ -101,6 +104,9 @@ class ChatClient:
         self.api_key = api_key
         self.reasoning_effort = reasoning_effort
         self.on_delta = on_delta
+        # Validated here, before any request: unsupported settings must never reach the network.
+        self.recurrence = recurrence if recurrence is not None and recurrence.enabled else None
+        self._adapter = recurrence.build_adapter() if recurrence is not None else None
         # Local traffic must not go through an HTTP proxy configured for the internet.
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -138,6 +144,7 @@ class ChatClient:
             data=json.dumps(body).encode(), headers={'Content-Type': 'application/json',
             'Authorization': f'Bearer {self.api_key}'})
         content, reasoning, calls, usage, finish = [], [], {}, {}, None
+        extra = {}
         visible = VisibleText(self.on_delta)
         size = 0
         started = time.monotonic()
@@ -158,6 +165,8 @@ class ChatClient:
                     if data.get('error'):
                         raise ModelError(str(data['error']))
                     usage = data.get('usage') or usage
+                    # Keep top-level chunk fields so a documented usage_field outside `usage` still resolves.
+                    extra.update({k: v for k, v in data.items() if k not in ('choices', 'usage')})
                     for choice in data.get('choices') or []:
                         if choice.get('index', 0) != 0:
                             continue
@@ -197,7 +206,8 @@ class ChatClient:
                 raise PartialResponse('Model stream ended before completion', visible.text)
             raise ModelError('Model stream ended before completion')
         return {'choices': [{'finish_reason': finish, 'message': {'content': ''.join(content),
-            'reasoning_content': ''.join(reasoning), 'tool_calls': [calls[k] for k in sorted(calls)]}}], 'usage': usage}
+            'reasoning_content': ''.join(reasoning), 'tool_calls': [calls[k] for k in sorted(calls)]}}], 'usage': usage,
+            **extra}
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None,
              tool_names: set[str] | None = None) -> Reply:
@@ -210,7 +220,23 @@ class ChatClient:
         if tools:
             body["tools"] = tools
             body["tool_choice"] = "auto"
+        if self.recurrence is not None:
+            fields = self._adapter.request_fields(self.recurrence.steps)
+            clash = sorted(set(fields) & set(body))
+            if not fields or clash:
+                raise rec.RecurrenceError(f"recurrence adapter fields {sorted(fields) or '(none)'} are empty "
+                                          f"or collide with request fields {clash}")
+            body.update(fields)
+        started = time.perf_counter()
         data = self._stream_request(body) if self.on_delta is not None else self._request("/chat/completions", body)
+        latency = round(time.perf_counter() - started, 3)
+        record = None
+        if self.recurrence is not None:
+            # Identifiers and counts only: never hidden states, prompts or credentials.
+            record = dict(requested_steps=self.recurrence.steps,
+                          actual_steps=rec.actual_steps(self._adapter, self.recurrence.capability, data),
+                          backend=self.recurrence.capability.backend_id or None,
+                          adapter=self.recurrence.adapter, model=self.model, latency_s=latency)
         choices = data.get("choices") or []
         if not choices:
             raise ModelError(f"No choices in response: {str(data)[:500]}")
@@ -262,7 +288,7 @@ class ChatClient:
         return Reply(content=content, tool_calls=calls, native=native, raw_tool_calls=normalized,
                      reasoning=reasoning,
                      prompt_tokens=int((data.get("usage") or {}).get("prompt_tokens") or 0),
-                     finish_reason=choices[0].get("finish_reason"))
+                     finish_reason=choices[0].get("finish_reason"), recurrence=record)
 
 
 _TAGGED = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.S)

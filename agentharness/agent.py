@@ -25,6 +25,7 @@ from typing import Callable
 from .checks import CheckResult, CheckRunner, detect_checks
 from .context import ProjectInstructions
 from .dev import DevProcessManager
+from .recurrence import RecurrenceConfig
 from .llm import ContextOverflow, ModelError, PartialResponse, Reply, ToolCall
 from .policy import ActionPolicy, apply_policy
 from .skills import SkillRegistry
@@ -443,7 +444,7 @@ class Agent:
         self.log("message", message=self.messages[-1])
         self.log("model", content=clip(reply.content or "", 2000), reasoning=clip(reply.reasoning or "", 2000),
                  calls=[{"name": c.name, "args": c.arguments} for c in reply.tool_calls],
-                 native=reply.native, prompt_tokens=reply.prompt_tokens,
+                 native=reply.native, prompt_tokens=reply.prompt_tokens, recurrence=reply.recurrence,
                  seconds=round(time.monotonic() - model_started, 3))
         return reply
 
@@ -481,6 +482,10 @@ class Agent:
                     evidence_dir=str(self.evidence_dir),
                     next_step='Inspect current evidence and choose a tool; never replay prior edits blindly.')
 
+    def _recurrence_config(self):
+        cfg = getattr(self.client, 'recurrence', None)
+        return cfg.to_dict() if isinstance(cfg, RecurrenceConfig) else None
+
     def _save_session(self, status: str) -> None:
         digest = self._digest()
         atomic_json(self.evidence_dir / 'context-digest.json', digest)
@@ -496,6 +501,7 @@ class Agent:
             finish_attempts=self.finish_attempts, baseline={k:v.to_dict() for k,v in self.baseline.items()},
             journal=self.ws.journal, work_dir=str(self.ws.work_dir),
             model=getattr(self.client, 'model', None), base_url=getattr(self.client, 'base_url', None),
+            recurrence=self._recurrence_config(),
             check_names=self.checks.names(),
             check_commands={k:v for k,v in self.checks.checks.items() if isinstance(v, str)}))
 
@@ -986,7 +992,8 @@ class Agent:
         self.started = time.monotonic()
         self.task = task
         self.log("resume" if resume else "start", task=task, config=asdict(self.config), checks=self.checks.names(),
-                 model=getattr(self.client, "model", None), project_config=self.project_config.path,
+                 model=getattr(self.client, "model", None), recurrence=self._recurrence_config(),
+                 project_config=self.project_config.path,
                  config_errors=self.project_config.errors, reattached=self.dev.reattached)
         plan, status, summary = None, "error", ""
         try:
