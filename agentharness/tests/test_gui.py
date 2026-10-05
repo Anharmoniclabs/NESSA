@@ -77,3 +77,36 @@ class GuiTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class StatusLine(unittest.TestCase):
+    def window(self, *, cancelled=False):
+        try:
+            from agentharness.gui import Window
+        except ImportError as exc:
+            self.skipTest(str(exc))
+        from types import SimpleNamespace
+        from threading import Event
+        win = object.__new__(Window)
+        cancel = Event()
+        if cancelled:
+            cancel.set()
+        win.app = SimpleNamespace(chats={'k': SimpleNamespace(cancel=cancel)})
+        win.current, win.started = 'k', 0.0
+        return win
+
+    def state(self, **kw):
+        return {**dict(busy=True, plan=None, partial='', activity=[]), **kw}
+
+    def test_stopping_and_streaming_outrank_a_pending_plan(self):
+        self.assertIn('Stopping', self.window(cancelled=True)._status_text(self.state(plan={'goal': 'x'})))
+        self.assertEqual(self.window()._status_text(self.state(partial='hi', plan={'goal': 'x'})),
+                         'Nessa is replying…')
+
+    def test_plan_idle_and_tool_states(self):
+        win = self.window()
+        self.assertEqual(win._status_text(self.state(plan={'goal': 'x'})), 'Waiting for your plan approval')
+        self.assertEqual(win._status_text(dict(busy=False, plan=None, partial='', activity=[])), '')
+        running = self.state(activity=[{'event': 'operation_started', 'data': {'name': 'read_file'}}])
+        self.assertEqual(win._status_text(running), 'Using read_file…')
+        self.assertTrue(win._status_text(self.state()).startswith('Nessa is thinking'))

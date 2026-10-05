@@ -52,6 +52,22 @@ class Window:
         self.creating = False
         self.creation = queue.Queue()
         self.drafts = {}
+        self._apply_theme()
+        self._build_sidebar()
+        self._build_conversation()
+        self._build_hero()
+        self._build_approval()
+        self._build_composer()
+        self._build_details()
+        root.bind('<Control-n>', lambda _: self.new())
+        self.refresh_history()
+        self.new()
+        if project:
+            self.root.after(100, lambda: self.create(project))
+        self.tick()
+
+    def _apply_theme(self):
+        root = self.root
         root.title('Nessa')
         root.geometry('1200x840')
         root.minsize(780, 620)
@@ -73,6 +89,9 @@ class Window:
         style.configure('TNotebook.Tab', background=PANEL, foreground=TEXT, padding=(15, 8))
         style.map('TNotebook.Tab', background=[('selected', SURFACE)])
         style.configure('Vertical.TScrollbar', background=SURFACE, troughcolor=BG, borderwidth=0, arrowsize=10)
+
+    def _build_sidebar(self):
+        root = self.root
         root.columnconfigure(1, weight=1)
         root.rowconfigure(0, weight=1)
         self.sidebar = tk.Frame(root, bg=PANEL, width=238, padx=16, pady=22)
@@ -100,6 +119,9 @@ class Window:
         tk.Frame(self.sidebar, bg='#2b292e', height=1).pack(fill='x', pady=18)
         tk.Label(self.sidebar, text='●  On-device assistant', bg=PANEL, fg='#a8bea9', font=(FONT, 9), anchor='w').pack(fill='x', padx=8)
         tk.Label(self.sidebar, text='Your space. Your pace.', bg=PANEL, fg='#79767f', font=(FONT, 9), anchor='w').pack(fill='x', padx=8, pady=(6, 0))
+
+    def _build_conversation(self):
+        root = self.root
         main = tk.Frame(root, bg=BG)
         main.grid(row=0, column=1, sticky='nsew')
         main.columnconfigure(0, weight=1)
@@ -131,6 +153,9 @@ class Window:
         self.chat.tag_configure('bold', font=(FONT, 11, 'bold'))
         self.chat.tag_configure('heading', font=(FONT, 14, 'bold'), spacing1=14, spacing3=10)
         self.chat.tag_configure('code', background=PANEL, foreground='#d3cbe1', font=('DejaVu Sans Mono', 10), lmargin1=16, lmargin2=16, spacing1=4, spacing3=4)
+
+    def _build_hero(self):
+        root = self.root
         self.hero = tk.Frame(self.content, bg=BG)
         self.hero.grid(row=1, column=0, sticky='nsew')
         intro = tk.Frame(self.hero, bg=BG)
@@ -142,6 +167,9 @@ class Window:
         suggestions.pack()
         for title, prompt in [('Explore an idea', 'Help me think through an idea: '), ('Make a plan', 'Help me make a plan for '), ('Explain something', 'Explain this to me: ')]:
             ttk.Button(suggestions, text=title, command=lambda p=prompt: self.suggest(p)).pack(side='left', padx=4)
+
+    def _build_approval(self):
+        root = self.root
         self.approval = ttk.Frame(self.content, padding=(0, 10))
         self.approval.columnconfigure(0, weight=1)
         self.plan_label = ttk.Label(self.approval, wraplength=620)
@@ -150,6 +178,9 @@ class Window:
         ttk.Button(self.approval, text='Reject', command=lambda: self.decide(False)).grid(row=1, column=1, sticky='e')
         self.status = ttk.Label(self.content, text='', foreground=MUTED, font=(FONT, 9))
         self.status.grid(row=4, column=0, sticky='w', padx=10, pady=(6, 8))
+
+    def _build_composer(self):
+        root = self.root
         compose = RoundedSurface(self.content, height=144)
         compose.grid(row=5, column=0, sticky='ew')
         compose.body.columnconfigure(0, weight=1)
@@ -173,6 +204,9 @@ class Window:
         self.stop_button.pack(side='right', padx=8)
         self.stop_button.pack_forget()
         ttk.Label(self.content, text='Local by design   ·   Enter to send, Shift+Enter for a new line', foreground='#7f7c85', font=(FONT, 8), anchor='center').grid(row=6, column=0, sticky='ew', pady=(12, 18))
+
+    def _build_details(self):
+        root = self.root
         self.details = tk.Toplevel(root)
         self.details.withdraw()
         self.details.title('Nessa · Workspace')
@@ -190,12 +224,6 @@ class Window:
         self.tabs.pack(fill='both', expand=True, padx=18, pady=18)
         self.activity = self.text_tab(self.tabs, 'Activity')
         self.patch = self.text_tab(self.tabs, 'Changes')
-        root.bind('<Control-n>', lambda _: self.new())
-        self.refresh_history()
-        self.new()
-        if project:
-            self.root.after(100, lambda: self.create(project))
-        self.tick()
 
     def text_panel(self, frame):
         text = tk.Text(frame, bg=BG, fg=TEXT, insertbackground=TEXT, wrap='word', font=('DejaVu Sans Mono', 10),
@@ -367,90 +395,115 @@ class Window:
         if self.current:
             self.app.stop(self.current)
 
-    def tick(self):
+    def _poll_creation(self):
+        """Pick up a finished project-copy request from the background thread."""
         try:
             key, error = self.creation.get_nowait()
-            self.creating = False
-            self.new_button.configure(state='normal')
-            self.project_button.configure(state='normal')
-            self.send_button.configure(state='normal')
-            if error:
-                messagebox.showerror('Unable to open project', error)
-                self.status.configure(text='Could not create a project copy.')
-            else:
-                self.current = key
-                self.rendered = None
-                self.refresh_history()
         except queue.Empty:
-            pass
+            return
+        self.creating = False
+        self.new_button.configure(state='normal')
+        self.project_button.configure(state='normal')
+        self.send_button.configure(state='normal')
+        if error:
+            messagebox.showerror('Unable to open project', error)
+            self.status.configure(text='Could not create a project copy.')
+        else:
+            self.current = key
+            self.rendered = None
+            self.refresh_history()
+
+    def _render_conversation(self, d):
+        """Redraw the transcript only when its messages or the streaming partial changed."""
+        fingerprint = json.dumps([self.current, d['messages'], d.get('partial')])
+        if fingerprint == self.rendered:
+            return
+        if d['messages']:
+            self.hero.grid_remove()
+            self.conversation.grid()
+        else:
+            self.conversation.grid_remove()
+            self.hero.grid()
+        self.chat.configure(state='normal')
+        self.chat.delete('1.0', 'end')
+        for m in d['messages']:
+            self.chat.insert('end', ('You' if m['role'] == 'user' else '✳  Nessa') + '\n', m['role'])
+            if m['role'] == 'user':
+                self.chat.insert('end', m['content'] + '\n\n', 'user_body')
+            else:
+                self.render_reply(m['content'])
+            if m.get('status') not in (None, 'answered'):
+                self.chat.insert('end', m['status'].replace('_', ' ') + '\n\n', 'meta')
+        if d.get('partial'):
+            self.chat.insert('end', '✳  Nessa\n', 'assistant')
+            self.render_reply(d['partial'])
+        self.chat.configure(state='disabled')
+        self.chat.see('end')
+        self.rendered = fingerprint
+
+    def _render_details(self, d):
+        """Refresh the Activity and Changes tabs and the Apply button."""
+        activity = '\n\n'.join(e['event'].replace('_', ' ').upper() + '\n' +
+                                json.dumps(e['data'], ensure_ascii=False, indent=2) for e in d['activity'])
+        if self.activity.get('1.0', 'end-1c') != activity:
+            self.set_text(self.activity, activity)
+            self.activity.see('end')
+        result = d.get('result') or {}
+        patch = result.get('patch') or 'No file changes yet.'
+        if result.get('evidence_dir'):
+            patch = 'Evidence: ' + result['evidence_dir'] + '\n\n' + patch
+        if self.patch.get('1.0', 'end-1c') != patch:
+            self.set_text(self.patch, patch)
+        applyable = (d['project'] and not d['busy'] and result.get('patch')
+                     and result.get('status') in ('verified', 'unverified'))
+        self.apply_button.configure(state='normal' if applyable else 'disabled')
+
+    def _status_text(self, d) -> str:
+        """What the status line says right now. Stopping and streaming outrank a pending plan."""
+        if d['busy'] and self.app.chats[self.current].cancel.is_set():
+            return 'Stopping at the next response or tool boundary…'
+        if d['busy'] and d.get('partial'):
+            return 'Nessa is replying…'
+        if d['plan']:
+            return 'Waiting for your plan approval'
+        if not d['busy']:
+            return ''
+        status = ('Nessa is thinking' + '.' * (1 + int(time.monotonic()) % 3) + '   ' +
+                  str(int(time.monotonic() - self.started)) + 's')
+        last_tool = next((e for e in reversed(d['activity'])
+                          if e['event'] in ('operation_started', 'operation_finished', 'model_started')), None)
+        if last_tool and last_tool['event'] == 'operation_started':
+            status = 'Using ' + last_tool['data'].get('name', 'tool') + '…'
+        return status
+
+    def _sync_controls(self, d):
+        busy = d['busy']
+        self.send_button.configure(state='disabled' if busy or self.creating else 'normal')
+        if busy:
+            self.stop_button.pack(side='right', padx=8)
+        else:
+            self.stop_button.pack_forget()
+        self.stop_button.configure(state='normal' if busy else 'disabled')
+        plan = d['plan']
+        if plan:
+            self.plan_label.configure(text='PLAN APPROVAL\n' + plan.get('goal', '') + '\n' +
+                                      '\n'.join(str(step) for step in plan.get('steps', [])))
+            self.approval.grid(row=3, column=0, sticky='ew')
+        else:
+            self.approval.grid_remove()
+        active = d.get('active_model', '')
+        self.model_label.configure(text='✳  ' + ('Local LFM' if active.startswith('nessa-lfm:') else 'Local chat'))
+        if not self.creating:
+            self.status.configure(text=self._status_text(d))
+
+    def tick(self):
+        self._poll_creation()
         if self.current:
             d = self.app.snapshot(self.current)
-            self.project.configure(text=('Project · '+Path(d['project']).name) if d['project'] else '')
-            fingerprint = json.dumps([self.current, d['messages'], d.get('partial')])
-            if fingerprint != self.rendered:
-                if d['messages']:
-                    self.hero.grid_remove()
-                    self.conversation.grid()
-                else:
-                    self.conversation.grid_remove()
-                    self.hero.grid()
-                self.chat.configure(state='normal')
-                self.chat.delete('1.0', 'end')
-                for m in d['messages']:
-                    self.chat.insert('end', ('You' if m['role']=='user' else '✳  Nessa')+'\n', m['role'])
-                    if m['role'] == 'user':
-                        self.chat.insert('end', m['content']+'\n\n', 'user_body')
-                    else:
-                        self.render_reply(m['content'])
-                    if m.get('status') not in (None, 'answered'):
-                        self.chat.insert('end', m['status'].replace('_', ' ')+'\n\n', 'meta')
-                if d.get('partial'):
-                    self.chat.insert('end', '✳  Nessa\n', 'assistant')
-                    self.render_reply(d['partial'])
-                self.chat.configure(state='disabled')
-                self.chat.see('end')
-                self.rendered = fingerprint
-            activity = '\n\n'.join(e['event'].replace('_', ' ').upper()+'\n'+json.dumps(e['data'], ensure_ascii=False, indent=2) for e in d['activity'])
-            if self.activity.get('1.0', 'end-1c') != activity:
-                self.set_text(self.activity, activity)
-                self.activity.see('end')
-            result = d.get('result') or {}
-            patch = result.get('patch') or 'No file changes yet.'
-            if result.get('evidence_dir'):
-                patch = 'Evidence: '+result['evidence_dir']+'\n\n'+patch
-            if self.patch.get('1.0', 'end-1c') != patch:
-                self.set_text(self.patch, patch)
-            applyable = (d['project'] and not d['busy'] and result.get('patch')
-                         and result.get('status') in ('verified', 'unverified'))
-            self.apply_button.configure(state='normal' if applyable else 'disabled')
-            self.send_button.configure(state='disabled' if d['busy'] or self.creating else 'normal')
-            if d['busy']:
-                self.stop_button.pack(side='right', padx=8)
-            else:
-                self.stop_button.pack_forget()
-            self.stop_button.configure(state='normal' if d['busy'] else 'disabled')
-            if d['plan']:
-                plan = d['plan']
-                self.plan_label.configure(text='PLAN APPROVAL\n'+plan.get('goal', '')+'\n'+'\n'.join(str(s) for s in plan.get('steps', [])))
-                self.approval.grid(row=3, column=0, sticky='ew')
-                status = 'Waiting for your plan approval'
-            else:
-                self.approval.grid_remove()
-                status = 'Nessa is thinking'+'.' * (1 + int(time.monotonic()) % 3)+'   '+str(int(time.monotonic()-self.started))+'s' if d['busy'] else ''
-                if d['busy'] and d['activity']:
-                    last_tool = next((e for e in reversed(d['activity'])
-                                      if e['event'] in ('operation_started', 'operation_finished', 'model_started')), None)
-                    if last_tool and last_tool['event'] == 'operation_started':
-                        status = 'Using '+last_tool['data'].get('name', 'tool')+'…'
-            if d['busy'] and self.app.chats[self.current].cancel.is_set():
-                status = 'Stopping at the next response or tool boundary…'
-            elif d['busy'] and d.get('partial'):
-                status = 'Nessa is replying…'
-            active = d.get('active_model', '')
-            label = 'Local LFM' if active.startswith('nessa-lfm:') else 'Local chat'
-            self.model_label.configure(text='✳  ' + label)
-            if not self.creating:
-                self.status.configure(text=status)
+            self.project.configure(text=('Project · ' + Path(d['project']).name) if d['project'] else '')
+            self._render_conversation(d)
+            self._render_details(d)
+            self._sync_controls(d)
         self.root.after(400, self.tick)
 
     def close(self):
