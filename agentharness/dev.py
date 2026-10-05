@@ -15,6 +15,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .session import atomic_json
+
 
 @dataclass
 class DevProcess:
@@ -24,7 +26,9 @@ class DevProcess:
     pid: int
     log_path: str
     started_at: float
-    proc: subprocess.Popen
+    proc: subprocess.Popen | None
+    identity: str | None = None
+    returncode: int | None = None
 
 
 class DevProcessManager:
@@ -33,6 +37,8 @@ class DevProcessManager:
         self.dir = Path(evidence_dir) / "dev"
         self.dir.mkdir(parents=True, exist_ok=True)
         self.processes: dict[str, DevProcess] = {}
+        self.state_path = self.dir / "processes.json"
+        self._reconcile()
 
     @staticmethod
     def _name(name: str) -> str:
@@ -41,9 +47,63 @@ class DevProcessManager:
             raise ValueError("process name must match [A-Za-z0-9_.-]{1,64}")
         return name
 
+    @staticmethod
+    def _identity(pid: int) -> str | None:
+        """Linux process start-time identity used to reject PID reuse."""
+        if os.name != "posix":
+            return None
+        try:
+            fields = Path(f"/proc/{pid}/stat").read_text().split()
+            return fields[21] if len(fields) > 21 else None
+        except OSError:
+            return None
+
+    @classmethod
+    def _alive(cls, pid: int, identity: str | None) -> bool:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        current = cls._identity(pid)
+        return identity is None or current is None or current == identity
+
+    def _reconcile(self) -> None:
+        if not self.state_path.exists():
+            return
+        try:
+            payload = json.loads(self.state_path.read_text())
+        except (OSError, ValueError):
+            return
+        rows = payload.get("processes", []) if isinstance(payload, dict) else payload
+        for row in rows:
+            try:
+                item = DevProcess(row["name"], list(row["argv"]), row["cwd"], int(row["pid"]),
+                                  row["log_path"], float(row["started_at"]), None,
+                                  row.get("identity"), row.get("returncode"))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if item.returncode is None and not self._alive(item.pid, item.identity):
+                item.returncode = -1
+            self.processes[item.name] = item
+        self._write_state()
+
+    def _running(self, item: DevProcess) -> bool:
+        if item.proc is not None:
+            code = item.proc.poll()
+            if code is None:
+                return True
+            item.returncode = code
+            return False
+        if item.returncode is not None:
+            return False
+        if self._alive(item.pid, item.identity):
+            return True
+        item.returncode = -1
+        return False
+
     def start(self, name: str, argv: list[str], cwd: str = ".") -> str:
         name = self._name(name)
-        if name in self.processes and self.processes[name].proc.poll() is None:
+        if name in self.processes and self._running(self.processes[name]):
             raise ValueError(f"dev process {name!r} is already running")
         if not isinstance(argv, list) or not argv or not all(isinstance(x, str) and x for x in argv):
             raise ValueError("argv must be a non-empty array of strings")
@@ -66,7 +126,7 @@ class DevProcessManager:
             log.close()
         time.sleep(0.15)
         item = DevProcess(name, list(argv), self.workspace.rel(workdir), proc.pid,
-                          str(log_path), time.time(), proc)
+                          str(log_path), time.time(), proc, self._identity(proc.pid))
         self.processes[name] = item
         self._write_state()
         if proc.poll() is not None:
@@ -83,8 +143,11 @@ class DevProcessManager:
             if not item:
                 rows.append(f"{key}: unknown")
                 continue
-            code = item.proc.poll()
-            state = "running" if code is None else f"exited({code})"
+            running = self._running(item)
+            if running:
+                state = "running/attached" if item.proc is not None else "running/reconciled"
+            else:
+                state = "exited(unknown)" if item.returncode == -1 else f"exited({item.returncode})"
             rows.append(f"{key}: {state} pid={item.pid} cwd={item.cwd}")
         self._write_state()
         return "\n".join(rows)
@@ -110,11 +173,12 @@ class DevProcessManager:
         item = self.processes.get(name)
         if item is None:
             return f'ERROR: unknown process {name!r}'
-        try:
-            code = item.proc.wait(timeout=max(0, min(10, seconds)))
-            state = f'completed exit={code}' if code == 0 else f'failed exit={code}'
-        except subprocess.TimeoutExpired:
-            state = 'pending'
+        deadline = time.monotonic() + max(0, min(10, seconds))
+        while self._running(item) and time.monotonic() < deadline:
+            time.sleep(min(.1, max(0, deadline - time.monotonic())))
+        state = 'pending' if self._running(item) else (
+            'exited; code unavailable after restart' if item.returncode == -1 else
+            (f'completed exit={item.returncode}' if item.returncode == 0 else f'failed exit={item.returncode}'))
         self._write_state()
         return f'{name}: {state}\n{self.logs(name, 4000)}'
 
@@ -123,22 +187,39 @@ class DevProcessManager:
         item = self.processes.get(name)
         if not item:
             return f"{name}: unknown"
-        if item.proc.poll() is not None:
-            return f"{name}: already exited({item.proc.returncode})"
+        if not self._running(item):
+            return f"{name}: already exited"
         try:
             if os.name == "posix":
-                os.killpg(item.proc.pid, signal.SIGTERM)
+                os.killpg(item.pid, signal.SIGTERM)
             else:
-                item.proc.terminate()
-            item.proc.wait(timeout=grace_seconds)
+                if item.proc is not None:
+                    item.proc.terminate()
+                else:
+                    os.kill(item.pid, signal.SIGTERM)
+            if item.proc is not None:
+                item.proc.wait(timeout=grace_seconds)
+            else:
+                deadline = time.monotonic() + grace_seconds
+                while self._alive(item.pid, item.identity) and time.monotonic() < deadline:
+                    time.sleep(.05)
+                if self._alive(item.pid, item.identity):
+                    raise subprocess.TimeoutExpired(item.argv, grace_seconds)
         except subprocess.TimeoutExpired:
             if os.name == "posix":
-                os.killpg(item.proc.pid, signal.SIGKILL)
+                os.killpg(item.pid, signal.SIGKILL)
             else:
-                item.proc.kill()
-            item.proc.wait()
+                if item.proc is not None:
+                    item.proc.kill()
+                else:
+                    os.kill(item.pid, signal.SIGKILL)
+            if item.proc is not None:
+                item.proc.wait()
         self._write_state()
-        return f"{name}: stopped exit={item.proc.returncode}"
+        item.returncode = item.proc.returncode if item.proc is not None else -1
+        self._write_state()
+        code = "unknown" if item.returncode == -1 else item.returncode
+        return f"{name}: stopped exit={code}"
 
     def stop_all(self) -> None:
         for name in list(self.processes):
@@ -157,6 +238,7 @@ class DevProcessManager:
                 "pid": item.pid,
                 "log_path": item.log_path,
                 "started_at": item.started_at,
-                "returncode": item.proc.poll(),
+                "identity": item.identity,
+                "returncode": item.proc.poll() if item.proc is not None else item.returncode,
             })
-        (self.dir / "processes.json").write_text(json.dumps(rows, indent=2))
+        atomic_json(self.state_path, {"version": 2, "processes": rows})
