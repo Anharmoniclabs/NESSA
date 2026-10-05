@@ -164,3 +164,49 @@ class LFM(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class WarmChat(unittest.TestCase):
+    @staticmethod
+    def module():
+        spec = importlib.util.spec_from_file_location('warm_chat', ROOT / 'scripts/warm_chat.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)  # must not touch the network on import
+        return module
+
+    def serve(self, replies):
+        import http.server
+        import threading
+        seen = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(handler):
+                seen.append(json.loads(handler.rfile.read(int(handler.headers['Content-Length']))))
+                body = json.dumps(replies.pop(0)).encode()
+                handler.send_response(200)
+                handler.send_header('Content-Length', str(len(body)))
+                handler.end_headers()
+                handler.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f'http://127.0.0.1:{server.server_port}', seen
+
+    def test_import_has_no_side_effects_and_warm_requests_a_resident_model(self):
+        warm = self.module().warm
+        url, seen = self.serve([{'done': True}])
+        warm(url, 'tiny:latest')
+        self.assertEqual(seen, [{'model': 'tiny:latest', 'keep_alive': -1, 'stream': False}])
+
+    def test_incomplete_load_is_an_error_and_unreachable_server_is_retried_then_raised(self):
+        warm = self.module().warm
+        url, _ = self.serve([{'done': False}])
+        with self.assertRaises(RuntimeError):
+            warm(url, 'tiny:latest')
+        with self.assertRaises(OSError):
+            warm('http://127.0.0.1:9', 'tiny:latest', attempts=2, retry_seconds=0)

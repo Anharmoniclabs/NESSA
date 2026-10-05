@@ -17,13 +17,15 @@ from agentharness.desktop import App
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--base-url', default='http://127.0.0.1:11435/v1')
-    parser.add_argument('--model', default='nessa-lfm:latest')
+    parser.add_argument('--base-url', default='http://127.0.0.1:11435/v1', help='fast chat model server')
+    parser.add_argument('--model', default='nessa-lfm:latest', help='fast chat model')
+    parser.add_argument('--project-url', default='http://127.0.0.1:11435/v1', help='project (large) model server')
+    parser.add_argument('--project-model', default='nessa-lfm:latest')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     root = args.output or Path(tempfile.mkdtemp(prefix='nessa-chat-acceptance-'))
     root.mkdir(parents=True, exist_ok=True)
-    app = App(root / 'chats', 'http://127.0.0.1:11435/v1', 'nessa-lfm:latest',
+    app = App(root / 'chats', args.project_url, args.project_model,
               chat_model=args.model, chat_base_url=args.base_url)
     chat_id = app.create()['id']
     turns = []
