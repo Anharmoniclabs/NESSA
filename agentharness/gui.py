@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
 
+from . import panels
 from .desktop import App
 
 BG = '#202022'
@@ -20,6 +21,7 @@ MUTED = '#9b999f'
 ACCENT = '#d4c4f5'
 BORDER = '#3c3b40'
 FONT = 'DejaVu Sans'
+PANELS = ('Timeline', 'Checks', 'Context', 'Reviewer', 'Processes')  # details tabs after Activity and Changes
 
 
 class RoundedSurface(tk.Canvas):
@@ -224,6 +226,7 @@ class Window:
         self.tabs.pack(fill='both', expand=True, padx=18, pady=18)
         self.activity = self.text_tab(self.tabs, 'Activity')
         self.patch = self.text_tab(self.tabs, 'Changes')
+        self.panes = {title: self.text_tab(self.tabs, title) for title in PANELS}
 
     def text_panel(self, frame):
         text = tk.Text(frame, bg=BG, fg=TEXT, insertbackground=TEXT, wrap='word', font=('DejaVu Sans Mono', 10),
@@ -454,6 +457,15 @@ class Window:
             patch = 'Evidence: ' + result['evidence_dir'] + '\n\n' + patch
         if self.patch.get('1.0', 'end-1c') != patch:
             self.set_text(self.patch, patch)
+        activity_events = d['activity']
+        texts = {'Timeline': panels.timeline(activity_events),
+                 'Checks': panels.checks(activity_events, result, result.get('evidence_dir', '')),
+                 'Context': panels.context(activity_events),
+                 'Reviewer': panels.reviewer(activity_events),
+                 'Processes': panels.processes(activity_events)}
+        for title, text in texts.items():
+            if self.panes[title].get('1.0', 'end-1c') != text:
+                self.set_text(self.panes[title], text)
         applyable = (d['project'] and not d['busy'] and result.get('patch')
                      and result.get('status') in ('verified', 'unverified'))
         self.apply_button.configure(state='normal' if applyable else 'disabled')

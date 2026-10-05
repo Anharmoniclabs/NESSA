@@ -38,6 +38,16 @@ def _table(headers: list[str], rows: list[list]) -> str:
     return f"<table><tr>{head}</tr>{body}</table>"
 
 
+def _browser_rows(evidence_dir: Path) -> list[list]:
+    rows = []
+    for path in sorted((evidence_dir / "browser").glob("*.json")):
+        saved = _load(path)
+        if isinstance(saved, dict):
+            rows.append([saved.get("label", path.stem), saved.get("url", ""),
+                         len(saved.get("console") or []), len(saved.get("failed_requests") or [])])
+    return rows
+
+
 def render(evidence_dir: Path) -> str:
     evidence_dir = Path(evidence_dir)
     events = telemetry._events(evidence_dir / "events.jsonl")
@@ -55,6 +65,7 @@ def render(evidence_dir: Path) -> str:
     notable = [[e["seq"], e["event"], e.get("failing") or e.get("processes") or ""]
                for e in events if e.get("event") in ("stale_receipt", "repeated_failure", "dev_stop_failed",
                                                      "task_acceptance", "telemetry_error")]
+    replays = _browser_rows(evidence_dir)
     verdict = [["status", result.get("status", "unknown")], ["steps", result.get("steps", "")],
                ["changed files", ", ".join(result.get("changed_files") or [])],
                ["workspace sha", receipt.get("workspace_sha", "")[:16]],
@@ -63,6 +74,7 @@ def render(evidence_dir: Path) -> str:
                 ("Checks", _table(["phase", "check", "status", "time"], checks)),
                 ("Edit checkpoints", _table(["edit", "step", "files"], edits)),
                 ("Time by kind", _table(["kind", "count", "seconds"], totals)),
+                ("Browser captures", _table(["label", "url", "console", "failed requests"], replays)),
                 ("Integrity events", _table(["seq", "event", "detail"], notable))]
     body = "".join(f"<h2>{title}</h2>{content}" for title, content in sections)
     return (f"<!doctype html><meta charset=utf-8><title>Nessa run report</title><style>{STYLE}</style>"

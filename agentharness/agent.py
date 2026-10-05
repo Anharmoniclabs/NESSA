@@ -35,6 +35,7 @@ from . import online
 from . import efficient
 from . import config as project_config
 from . import telemetry
+from . import browser
 from . import receipt as receipts
 from .recall import RecallIndex, tool as recall_tool
 
@@ -293,6 +294,8 @@ class Agent:
             from .mcp import shared_bus
             self.mcp = shared_bus(self.project_config.mcp, ws.repo, self.evidence_dir / 'mcp')
             self.tools.update({k: v for k, v in self.mcp.tools().items() if k not in self.tools})
+            if browser.available(self.mcp):
+                self.tools.update(browser.tools())
         self.recall = recall
         if recall is not None:
             self.tools['recall'] = recall_tool()

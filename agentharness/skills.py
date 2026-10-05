@@ -68,7 +68,8 @@ BUILTINS = {
 3. Open or select a page with new_page/list_pages; page tools take the numeric pageId it reports.
    Inspect console errors, network failures, DOM state and performance traces relevant to the task.
 4. Correlate browser observations with source files and application logs.
-5. After a fix, repeat the same browser observation and then run the repository's normal tests.
+5. Before fixing, call browser_capture for the page; after fixing, call browser_replay against that capture and
+   treat anything other than `fixed` as unfinished. Then run the repository's normal tests.
 6. Save concise evidence (URL, observation, relevant error/trace, post-fix result) into the run log.""",
         ("dev_status", "dev_logs", "dev_health", "run_command", "run_check"),
         ("chrome", "node"),
