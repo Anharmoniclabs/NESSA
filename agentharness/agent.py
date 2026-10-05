@@ -222,6 +222,25 @@ def auto_approve(plan: dict) -> tuple[bool, str]:
     return True, ""
 
 
+CHAT_TOOLS = ('studio_control', 'start_work', 'weather', 'web_search', 'news_search', 'web_fetch', 'list_dir',
+              'read_file', 'search', 'outline', 'extract_text', 'local_list', 'local_read', 'local_extract',
+              'runtime_info', 'run_command')
+_NEXT_PASS, _END_PASSES = object(), object()  # control signals from _chat_text_reply
+
+
+@dataclass
+class _ChatState:
+    """What one conversation round has gathered across its model passes."""
+    needs_retrieval: bool
+    sources: dict = field(default_factory=dict)
+    fetched_sources: dict = field(default_factory=dict)
+    command_changed_files: bool = False
+    news_result: dict | None = None
+    retrieval_retry: bool = False
+    parts: list = field(default_factory=list)
+    interrupted_passes: int = 0
+
+
 class Agent:
     def __init__(self, client, ws: Workspace, *, config: AgentConfig | None = None,
                  checks: CheckRunner | None = None,
@@ -621,22 +640,130 @@ class Agent:
             parts.append("Lessons from earlier work on this project:\n" + "\n".join(f"- {l}" for l in self.lessons))
         return "\n\n".join(parts)
 
-    def _conversation_round(self) -> tuple[str | None, str]:
-        """Use read-only tools directly; hand mutations to the existing work loop."""
-        offered = [n for n in ('studio_control', 'start_work', 'weather', 'web_search', 'news_search', 'web_fetch',
-                   'list_dir', 'read_file', 'search', 'outline', 'extract_text', 'local_list', 'local_read', 'local_extract', 'runtime_info', 'run_command')
-                   if n in self.tools]
+    def _chat_tools(self) -> list[str]:
+        offered = [n for n in CHAT_TOOLS if n in self.tools]
         if self.config.efficient_chat:
             previous = self.user_messages[-2] if len(self.user_messages) > 1 else ''
             offered = efficient.chat_tools(self.task, offered, previous)
-        sources = {}
-        fetched_sources = {}
-        command_changed_files = False
-        news_result = None
-        retrieval_retry = False
-        parts = []
-        interrupted_passes = 0
-        needs_retrieval = online.is_news_query(self.task) or bool(re.search(r'\bsearch\b.*\b(web|internet)\b', self.task, re.I))
+        return offered
+
+    def _chat_command_approved(self, call: ToolCall) -> tuple[bool, str]:
+        """Ask the approver about a chat-phase shell command. Returns (approved, error text)."""
+        try:
+            args = self.tools[call.name].validate(call.arguments)
+        except ToolError as exc:
+            return False, f'ERROR: {exc}'
+        plan = {'goal': 'Run the requested local command', 'steps': [args['command']], 'files': [],
+                'checks': ['Inspect command exit status and output']}
+        approved, feedback = self.approver(plan)
+        self.log('approval', approved=approved, feedback=feedback, command=args['command'])
+        return approved, '' if approved else 'ERROR: command was not approved. ' + feedback
+
+    def _chat_read_call(self, call: ToolCall, offered: list[str], state: _ChatState) -> str | None:
+        """Run a read-only, studio or approved-command call. None means it is not one of those."""
+        approved = False
+        if call.name == 'run_command' and call.name in offered:
+            approved, refusal = self._chat_command_approved(call)
+            if not approved:
+                return refusal
+        if call.name not in offered or not (self.tools[call.name].kind == 'read' or approved
+                                            or call.name == 'studio_control'):
+            return None
+        before = self.ws.patch() if approved else None
+        output = self._execute(call, offered)
+        if approved and self.ws.patch() != before:
+            state.command_changed_files = True
+        if not output.startswith('ERROR:'):
+            self._note_sources(call, output, state)
+        return output
+
+    @staticmethod
+    def _note_sources(call: ToolCall, output: str, state: _ChatState) -> None:
+        """Remember what the answer was grounded in so unreferenced sources can be appended."""
+        if call.name == 'web_fetch' and call.arguments:
+            state.fetched_sources[call.arguments['url']] = 'Fetched page'
+        elif call.name in ('weather', 'web_search', 'news_search'):
+            try:
+                data = json.loads(output)
+                if data.get('kind') == 'news' and data.get('results'):
+                    state.news_result = data
+                if data.get('source'):
+                    state.fetched_sources[data['source']] = 'Weather source'
+                for item in data.get('results', [])[:5]:
+                    state.sources[item['url']] = item.get('title', 'Search result').replace('[', '').replace(']', '')
+            except (ValueError, TypeError, KeyError):
+                pass  # tools may return plain text; only structured results carry sources
+
+    def _chat_start_work(self, call: ToolCall, request: str | None) -> tuple[str | None, str]:
+        """Validate a start_work call. Returns (request or None, message for the model)."""
+        if call.name != 'start_work' or request is not None:
+            return request, 'ERROR: use one start_work call for the current request.'
+        try:
+            request = self.tools['start_work'].validate(call.arguments)['request']
+            if not request.strip():
+                raise ToolError('A concrete work request is required.')
+        except ToolError as exc:
+            return None, f'ERROR: {exc}'
+        return request, ('Project tools are now available. Inspect the request; '
+                         'answer informational questions or propose changes for approval.')
+
+    def _chat_text_reply(self, reply: Reply, state: _ChatState):
+        """Handle a tool-free text reply: a (status, text) result, _NEXT_PASS or _END_PASSES."""
+        insufficient = ((online.is_news_query(self.task) and state.news_result is None)
+                        or (state.needs_retrieval and not state.sources and not state.fetched_sources))
+        if insufficient:
+            if not state.retrieval_retry:
+                state.retrieval_retry = True
+                self._say('Retrieval is not complete. Preserve the full original topic: ' + self.task +
+                          '. Use news_search for news and obtain relevant dated articles. '
+                          'Do not answer from generic sites or model memory.')
+                return _NEXT_PASS
+            return 'blocked', ('I could not retrieve relevant sources for this request. '
+                               'I will not substitute unrelated pages or invent an answer.')
+        if state.command_changed_files:
+            self.phase = 'execute'
+            self._say('The command changed project files. Run verification and call finish; '
+                      'do not claim completion without checks.')
+            return None, ''
+        answer = reply.content.strip()
+        more = reply.finish_reason in ('length', 'interrupted') or answer.endswith('[[CONTINUE]]')
+        answer = answer.removesuffix('[[CONTINUE]]').rstrip()
+        if more or state.parts:
+            if state.parts and answer in state.parts:
+                # A small model can loop on its last section; keep its cursor
+                # pending rather than publishing the same section eight times.
+                self.messages.pop()
+                return _END_PASSES
+            self.messages[-1]['content'] = answer
+            state.parts.append(answer)
+            self.chat_progress = dict(request=self.chat_progress.get('request', self.task),
+                                      tail=answer[-2000:], pending=more,
+                                      passes=self.chat_progress.get('passes', 0) + 1)
+            self._save_session('awaiting_continuation' if more else 'answered')
+            self.log('chat_part', content=answer, pending=more, finish_reason=reply.finish_reason)
+            if more:
+                state.interrupted_passes += reply.finish_reason == 'interrupted'
+                self._say('Continue the same answer exactly where the last saved section ended. '
+                          'Complete a cut-off sentence first. Do not repeat the introduction or earlier sections. '
+                          'Keep the original request and established story details. Write the next short section; '
+                          'end with [[CONTINUE]] only if more of the requested answer remains.')
+                return _END_PASSES if state.interrupted_passes >= 2 else _NEXT_PASS
+            answer = '\n\n'.join(state.parts)
+        elif self.chat_progress:
+            self.chat_progress.update(pending=False, tail=answer[-2000:])
+        if state.news_result is not None:
+            return 'answered', online.render_news(state.news_result)
+        grounded = state.fetched_sources or state.sources
+        missing = [(url, title) for url, title in grounded.items() if url not in answer]
+        if missing:
+            answer += '\n\nSources:\n' + '\n'.join(f'- [{title}]({url})' for url, title in missing[:5])
+        return 'answered', answer
+
+    def _conversation_round(self) -> tuple[str | None, str]:
+        """Use read-only tools directly; hand mutations to the existing work loop."""
+        offered = self._chat_tools()
+        state = _ChatState(needs_retrieval=online.is_news_query(self.task) or bool(
+            re.search(r'\bsearch\b.*\b(web|internet)\b', self.task, re.I)))
         for _ in range(self.config.chat_passes):
             reply = self._ask(offered)
             results, request = [], None
@@ -644,55 +771,12 @@ class Agent:
                 if index >= self.config.max_calls_per_turn:
                     results.append((call, 'ERROR: deferred; submit in the next turn'))
                     continue
-                approved_command = False
-                if call.name == 'run_command' and call.name in offered:
-                    try:
-                        args = self.tools[call.name].validate(call.arguments)
-                        plan = {'goal': 'Run the requested local command',
-                                'steps': [args['command']], 'files': [], 'checks': ['Inspect command exit status and output']}
-                        approved_command, feedback = self.approver(plan)
-                        self.log('approval', approved=approved_command, feedback=feedback, command=args['command'])
-                        if not approved_command:
-                            results.append((call, 'ERROR: command was not approved. ' + feedback))
-                            continue
-                    except ToolError as exc:
-                        results.append((call, f'ERROR: {exc}'))
-                        continue
-                if call.name in offered and (self.tools[call.name].kind == 'read' or approved_command
-                                            or call.name == 'studio_control'):
-                    before_command = self.ws.patch() if approved_command else None
-                    output = self._execute(call, offered)
-                    if approved_command and self.ws.patch() != before_command:
-                        command_changed_files = True
+                output = self._chat_read_call(call, offered, state)
+                if output is not None:
                     results.append((call, output))
-                    if not output.startswith('ERROR:'):
-                        if call.name == 'web_fetch' and call.arguments:
-                            fetched_sources[call.arguments['url']] = 'Fetched page'
-                        elif call.name in ('weather', 'web_search', 'news_search'):
-                            try:
-                                data = json.loads(output)
-                                if data.get('kind') == 'news' and data.get('results'):
-                                    news_result = data
-                                if data.get('source'):
-                                    fetched_sources[data['source']] = 'Weather source'
-                                for item in data.get('results', [])[:5]:
-                                    sources[item['url']] = item.get('title', 'Search result').replace('[', '').replace(']', '')
-                            except (ValueError, TypeError, KeyError):
-                                pass
                     continue
-                if call.name != 'start_work' or request is not None:
-                    results.append((call, 'ERROR: use one start_work call for the current request.'))
-                    continue
-                try:
-                    request = self.tools['start_work'].validate(call.arguments)['request']
-                    if not request.strip():
-                        raise ToolError('A concrete work request is required.')
-                except ToolError as exc:
-                    request = None
-                    results.append((call, f'ERROR: {exc}'))
-                else:
-                    results.append((call, 'Project tools are now available. Inspect the request; '
-                                          'answer informational questions or propose changes for approval.'))
+                request, message = self._chat_start_work(call, request)
+                results.append((call, message))
             self._deliver(reply, results)
             if request is not None:
                 self.phase = 'plan'
@@ -701,60 +785,22 @@ class Agent:
                 self._say(self._intro(self.task))
                 return None, ''
             if not reply.tool_calls and reply.content.strip():
-                insufficient = (online.is_news_query(self.task) and news_result is None) or (needs_retrieval and not sources and not fetched_sources)
-                if insufficient:
-                    if not retrieval_retry:
-                        retrieval_retry = True
-                        self._say('Retrieval is not complete. Preserve the full original topic: '+self.task+
-                                  '. Use news_search for news and obtain relevant dated articles. Do not answer from generic sites or model memory.')
-                        continue
-                    return 'blocked', 'I could not retrieve relevant sources for this request. I will not substitute unrelated pages or invent an answer.'
-                if command_changed_files:
-                    self.phase = 'execute'
-                    self._say('The command changed project files. Run verification and call finish; do not claim completion without checks.')
-                    return None, ''
-                answer = reply.content.strip()
-                more = reply.finish_reason in ('length', 'interrupted') or answer.endswith('[[CONTINUE]]')
-                answer = answer.removesuffix('[[CONTINUE]]').rstrip()
-                if more or parts:
-                    if parts and answer in parts:
-                        # A small model can loop on its last section; keep its cursor
-                        # pending rather than publishing the same section eight times.
-                        self.messages.pop()
-                        break
-                    self.messages[-1]['content'] = answer
-                    parts.append(answer)
-                    self.chat_progress = dict(request=self.chat_progress.get('request', self.task),
-                                              tail=answer[-2000:], pending=more,
-                                              passes=self.chat_progress.get('passes', 0) + 1)
-                    self._save_session('awaiting_continuation' if more else 'answered')
-                    self.log('chat_part', content=answer, pending=more,
-                             finish_reason=reply.finish_reason)
-                    if more:
-                        interrupted_passes += reply.finish_reason == 'interrupted'
-                        self._say('Continue the same answer exactly where the last saved section ended. '
-                                  'Complete a cut-off sentence first. Do not repeat the introduction or earlier sections. '
-                                  'Keep the original request and established story details. Write the next short section; '
-                                  'end with [[CONTINUE]] only if more of the requested answer remains.')
-                        if interrupted_passes >= 2:
-                            break
-                        continue
-                    answer = '\n\n'.join(parts)
-                elif self.chat_progress:
-                    self.chat_progress.update(pending=False, tail=answer[-2000:])
-                if news_result is not None:
-                    return 'answered', online.render_news(news_result)
-                missing = [(url, title) for url,title in (fetched_sources or sources).items() if url not in answer]
-                if missing:
-                    answer += '\n\nSources:\n' + '\n'.join(f'- [{title}]({url})' for url,title in missing[:5])
-                return 'answered', answer
+                outcome = self._chat_text_reply(reply, state)
+                if outcome is _END_PASSES:
+                    break
+                if outcome is not _NEXT_PASS:
+                    return outcome
+                continue
             if not reply.tool_calls and reply.reasoning and reply.finish_reason == 'length':
                 # Repeating the same truncated reasoning never advances the answer.
-                return 'stalled', 'The local model used its response budget without finishing an answer. The conversation is saved.'
+                return 'stalled', ('The local model used its response budget without finishing an answer. '
+                                   'The conversation is saved.')
             self._say('Use the tool results to answer with sources, call another read tool if needed, '
-                      'or call start_work to execute the requested task. Do not claim unavailable capabilities without a tool failure.')
-        if parts:
-            return 'awaiting_continuation', '\n\n'.join(parts) + '\n\nProgress saved. Send “continue” to pick up here.'
+                      'or call start_work to execute the requested task. '
+                      'Do not claim unavailable capabilities without a tool failure.')
+        if state.parts:
+            return 'awaiting_continuation', ('\n\n'.join(state.parts) +
+                                            '\n\nProgress saved. Send “continue” to pick up here.')
         return 'stalled', 'I could not produce a reply. Please try again.'
 
     def _plan_round(self) -> dict | None:
