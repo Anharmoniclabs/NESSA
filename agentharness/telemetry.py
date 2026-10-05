@@ -39,9 +39,18 @@ def spans_from_events(events: list[dict]) -> list[dict]:
     for e in events:
         name, t = e.get("event"), float(e.get("t", 0))
         if name == "model":
+            attrs = {"tool_calls": len(e.get("calls") or []), "prompt_tokens": int(e.get("prompt_tokens") or 0)}
+            r = e.get("recurrence")
+            if isinstance(r, dict):
+                # Native backend recurrence only; unknown actual steps are omitted, never guessed.
+                attrs["recurrence_requested_steps"] = int(r.get("requested_steps") or 0)
+                if isinstance(r.get("actual_steps"), int):
+                    attrs["recurrence_actual_steps"] = r["actual_steps"]
+                attrs["recurrence_backend"] = r.get("backend") or ""
+                attrs["recurrence_model"] = r.get("model") or ""
+                attrs["recurrence_latency_s"] = float(r.get("latency_s") or 0)
             spans.append(dict(name="model", kind="model", start=t - float(e.get("seconds") or 0), end=t,
-                              attributes={"tool_calls": len(e.get("calls") or []),
-                                          "prompt_tokens": int(e.get("prompt_tokens") or 0)}, status="ok"))
+                              attributes=attrs, status="ok"))
         elif name == "operation_started":
             started[e.get("operation_id")] = (t, e.get("name", "tool"))
         elif name == "operation_finished" and e.get("operation_id") in started:
@@ -64,8 +73,20 @@ def summarize(spans: list[dict], status: str, seconds: float) -> dict:
         row["count"] += 1
         row["seconds"] = round(row["seconds"] + s["end"] - s["start"], 3)
     slowest = sorted(spans, key=lambda s: s["start"] - s["end"])[:5]
-    return dict(status=status, wall_seconds=seconds, totals=totals,
-                slowest=[{"name": s["name"], "seconds": round(s["end"] - s["start"], 3)} for s in slowest])
+    models = [s for s in spans if s["kind"] == "model"]
+    native = [s["attributes"] for s in models if "recurrence_requested_steps" in s["attributes"]]
+    out = dict(status=status, wall_seconds=seconds, totals=totals,
+               agent_passes=len(models),   # controller model turns: reported separately from native recurrence
+               slowest=[{"name": s["name"], "seconds": round(s["end"] - s["start"], 3)} for s in slowest])
+    if native:
+        out["native_recurrence"] = dict(
+            model_calls=len(native),
+            requested_steps_total=sum(a["recurrence_requested_steps"] for a in native),
+            actual_steps_total=(sum(a["recurrence_actual_steps"] for a in native if "recurrence_actual_steps" in a)
+                                if any("recurrence_actual_steps" in a for a in native) else None),
+            actual_unknown_calls=sum("recurrence_actual_steps" not in a for a in native),
+            latency_s=round(sum(a["recurrence_latency_s"] for a in native), 3))
+    return out
 
 
 def otlp(spans: list[dict], run_name: str, status: str, start: float, end: float) -> dict:

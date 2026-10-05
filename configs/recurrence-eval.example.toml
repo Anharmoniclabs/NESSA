@@ -1,0 +1,27 @@
+# EXAMPLE ONLY - no recurrent backend has been verified by NESSA. Replace every value in
+# [recurrence] with what YOUR backend's documentation states; the names below are placeholders.
+# Validate / list arms:  python -m agentharness recurrence-plan configs/recurrence-eval.example.toml
+# Run a task with one arm:
+#   python -m agentharness run PROJECT "task" --recurrence-config configs/recurrence-eval.example.toml --recurrence-steps 2
+
+[recurrence]
+adapter = "field-mapping"
+
+[recurrence.options]
+request_field = "recurrence.steps"        # placeholder: request body field from backend docs
+usage_field = "usage.recurrence_steps"    # placeholder: response field with executed steps (omit if none)
+
+[recurrence.capability]
+native_recurrence = true
+steps = [1, 2, 4]                          # depths the backend documents as supported
+reports_actual_usage = true                # false if the backend does not report executed steps
+backend_id = "example-backend"
+
+[evaluation]
+depths = [1, 2, 4]                         # native depths compared; each must be supported above
+include_baseline = true                    # arm with recurrence off (plain request)
+
+[evaluation.budget]                        # identical for every arm; agent passes never trade against depth
+agent_max_steps = 40
+time_budget = 1800
+max_tokens = 4096
