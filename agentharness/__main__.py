@@ -27,6 +27,8 @@ from .reviewer import Reviewer
 from .skills import SkillRegistry
 from .workspace import ToolError, Workspace
 from .profiles import PROFILES, apply_profile
+from . import promote
+from .promote import PromotionError
 from .session import SessionStore
 
 DEFAULT_URL = os.environ.get("AGENT_BASE_URL", "http://127.0.0.1:11434/v1")  # Ollama
@@ -432,6 +434,8 @@ def _register_utility_commands(sub) -> None:
     rp.add_argument("--out", default="", help="output file (default: report.html inside the evidence directory)")
     rp.set_defaults(fn=cmd_report)
 
+    promote.register(sub)
+
     d = sub.add_parser("doctor", help="check setup")
     _model_args(d)
     d.set_defaults(fn=cmd_doctor)
@@ -449,6 +453,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     a = build_parser().parse_args(argv)
+    try:
+        return _dispatch(a)
+    except PromotionError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+
+
+def _dispatch(a) -> int:
     if hasattr(a, "profile"):
         apply_profile(a)
     return a.fn(a)
