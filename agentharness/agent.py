@@ -180,6 +180,7 @@ class RunResult:
     checks: dict = field(default_factory=dict)
     evidence_dir: str = ""
     seconds: float = 0.0
+    acceptance: dict | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -227,10 +228,12 @@ class Agent:
                  evidence_dir: Path | None = None, reviewer=None,
                  skills: SkillRegistry | None = None,
                  project_instructions: ProjectInstructions | None = None, on_event=None,
-                 chat_client=None, conversation_context: str = ''):
+                 chat_client=None, conversation_context: str = '',
+                 acceptance_grader: Callable[[Workspace, str, str], dict] | None = None):
         self.client = client
         self.chat_client = chat_client
         self.conversation_context = conversation_context
+        self.acceptance_grader = acceptance_grader
         self.ws = ws
         self.config = config or AgentConfig()
         self.project_config = project_config.load(ws.repo)
@@ -279,6 +282,7 @@ class Agent:
         self.steps = 0
         self.no_progress = 0
         self.finish_attempts = 0
+        self.acceptance_result = None
         self.baseline: dict[str, CheckResult] = {}
         self.final: dict[str, CheckResult] = {}
         self.last_tool = ""
@@ -487,6 +491,7 @@ class Agent:
             steps=self.steps, edit_count=self.edit_count, active_skills=self.active_skills,
             lessons=self.lessons, skill_context=self.skill_context,
             latest_checks=self.latest_checks, last_observation=self.last_observation,
+            acceptance_result=self.acceptance_result,
             elapsed=self.elapsed + time.monotonic() - self.started,
             finish_attempts=self.finish_attempts, baseline={k:v.to_dict() for k,v in self.baseline.items()},
             journal=self.ws.journal, work_dir=str(self.ws.work_dir),
@@ -834,19 +839,63 @@ class Agent:
             self._say(f"The plan was rejected: {feedback}\nRevise it and call propose_plan again.")
         return "rejected", None
 
-    def _finish_gate(self) -> tuple[str | None, str]:
+    def _grade_acceptance(self, summary: str) -> dict | None:
+        """Run an optional host-owned task grader, independently of project checks."""
+        if self.acceptance_grader is None:
+            return None
+        try:
+            result = self.acceptance_grader(self.ws, self.task, summary)
+            if not isinstance(result, dict):
+                raise TypeError("grader must return an object")
+            status = result.get("status")
+            if status not in ("passed", "failed", "skipped", "timeout", "error", "no_tests"):
+                raise ValueError("grader returned an unsupported status")
+            acceptance = {
+                "status": status,
+                "scope": result.get("scope", ""),
+                "evidence": result.get("evidence", None),
+                "grader": result.get("grader", ""),
+                "failure_category": result.get("failure_category"),
+            }
+        except Exception as exc:
+            acceptance = {
+                "status": "error", "scope": "", "evidence": None, "grader": "",
+                "failure_category": "grader_error",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        self.acceptance_result = acceptance
+        self.log("task_acceptance", **acceptance)
+        return acceptance
+
+    def _finish_gate(self, summary: str = "") -> tuple[str | None, str]:
         """Decide whether a `finish` request is accepted. Returns (final status or None, message)."""
-        if not self.ws.changed_files():
-            return "no_change", "Finished with no changes."
-        self.final = {n: (self.checks.run(n, self.ws) if n in self.checks.checks else
-                          CheckResult(n, 'no_tests' if n == 'tests' else 'error', output='Check not registered'))
-                      for n in self._finish_checks()}
+        changed = self.ws.changed_files()
+        if changed:
+            self.final = {n: (self.checks.run(n, self.ws) if n in self.checks.checks else
+                              CheckResult(n, 'no_tests' if n == 'tests' else 'error', output='Check not registered'))
+                          for n in self._finish_checks()}
+        else:
+            self.final = {}
         for r in self.final.values():
             self.log("check", phase="verify", **{**r.to_dict(), "output": clip(r.output, 2000)})
         self.latest_checks.update({k: v.brief() for k,v in self.final.items()})
+        acceptance = self._grade_acceptance(summary)
         if self.reviewer is not None:
             self._review_patch('final', self.ws.patch(), '\n'.join(self.latest_checks.values()))
         failing = [r for r in self.final.values() if r.status in ('failed', 'timeout', 'setup_error', 'error')]
+        acceptance_failed = acceptance is not None and acceptance["status"] != "passed"
+        if acceptance_failed:
+            detail = acceptance.get("error") or acceptance.get("evidence") or acceptance["status"]
+            if isinstance(detail, (dict, list)):
+                detail = json.dumps(detail, ensure_ascii=False, default=str)
+            report = f"Task acceptance {acceptance['status']}: {clip(str(detail), 1500)}"
+            if self.finish_attempts < self.config.finish_retries:
+                self.finish_attempts += 1
+                return None, ("Not accepted: task acceptance failed.\n" + report
+                              + "\nChange strategy or explain the blocker, then call finish again.")
+            return "failed_checks", "Stopped: task acceptance did not pass."
+        if not changed:
+            return "no_change", "Finished with no changes."
         if not failing:
             real = (all(r.status == 'passed' for r in self.final.values()) and
                     any(r.name != 'syntax' for r in self.final.values()))
@@ -903,7 +952,7 @@ class Agent:
                         results.append((call, f'ERROR: {exc}'))
                         continue
                     if call.name == 'finish':
-                        status, message = self._finish_gate()
+                        status, message = self._finish_gate(args['summary'])
                         if status:
                             terminal = (status, args['summary'])
                     elif call.name == 'respond':
@@ -961,6 +1010,7 @@ class Agent:
                 self.last_observation = saved['last_observation']
                 self.elapsed = saved['elapsed']
                 self.finish_attempts = saved['finish_attempts']
+                self.acceptance_result = saved.get('acceptance_result')
                 self.baseline = {k: CheckResult(**v) for k,v in saved['baseline'].items()}
                 self.ws.journal = saved['journal']
                 self.ws._seen.clear()  # require fresh reads after restart
@@ -1055,7 +1105,8 @@ class Agent:
         result = RunResult(status, summary, patch, self.steps, self.ws.changed_files(), plan,
                            {"baseline": {k: v.brief() for k, v in self.baseline.items()},
                             "final": {k: v.brief() for k, v in self.final.items()}},
-                           str(self.evidence_dir), round(time.monotonic() - self.started, 1))
+                           str(self.evidence_dir), round(time.monotonic() - self.started, 1),
+                           self.acceptance_result)
         (self.evidence_dir / "patch.diff").write_text(patch)
         (self.evidence_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         (self.evidence_dir / "messages.json").write_text(json.dumps(self.messages, indent=1, default=str))

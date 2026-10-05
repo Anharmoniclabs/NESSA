@@ -95,6 +95,35 @@ class HarnessLayers(unittest.TestCase):
         self.assertTrue(any(e["event"] == "checkpoint" for e in events))
         self.assertTrue(any(e["event"] == "check" and e.get("phase") == "continuous" for e in events))
 
+    def test_task_acceptance_is_separate_and_skipped_grader_is_not_a_pass(self):
+        ws = Workspace.create(self.proj, self.tmp / "acceptance")
+        grader = lambda ws, task, summary: {
+            "status": "skipped", "scope": "CSV source unchanged", "evidence": "fixture missing"}
+        client = ScriptedClient([[("finish", {"summary": "I did not validate the CSV."})]])
+        result = Agent(client, ws, config=AgentConfig(
+            require_approval=False, plan_first=False, baseline_checks=False, finish_retries=0),
+            checks=CheckRunner({"syntax": syntax_check}), acceptance_grader=grader).run("Check CSV")
+
+        self.assertEqual(result.status, "failed_checks")
+        self.assertEqual(result.checks["final"], {})
+        self.assertEqual(result.acceptance["status"], "skipped")
+        saved = json.loads((Path(result.evidence_dir) / "result.json").read_text())
+        self.assertEqual(saved["acceptance"]["scope"], "CSV source unchanged")
+
+    def test_task_acceptance_pass_does_not_relabel_existing_check_scope(self):
+        ws = Workspace.create(self.proj, self.tmp / "acceptance")
+        client = ScriptedClient([[("finish", {"summary": "The source is unchanged."})]])
+        result = Agent(client, ws, config=AgentConfig(
+            require_approval=False, plan_first=False, baseline_checks=False),
+            checks=CheckRunner({"syntax": syntax_check}),
+            acceptance_grader=lambda ws, task, summary: {
+                "status": "passed", "scope": "CSV input unchanged", "evidence": "sha256 verified"}
+        ).run("Check CSV")
+
+        self.assertEqual(result.status, "no_change")
+        self.assertEqual(result.checks["final"], {})
+        self.assertEqual(result.acceptance["status"], "passed")
+
     def test_reviewer_is_advisory_text_only(self):
         class ReviewClient:
             model = "reviewer"
