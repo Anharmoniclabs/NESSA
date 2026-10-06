@@ -192,7 +192,11 @@ class App:
         if choice.startswith('cloud:'):  # exactly the chosen model: no silent fallback
             models, main_chain, chat_chain = (choice[len('cloud:'):],), [], []
         else:
-            models, main_chain, chat_chain = cloud_models.DEFAULT_MODELS, [client], [fast]
+            # Auto skips models already known to be out of credits, so each turn doesn't retry them.
+            models = tuple(m for m in cloud_models.DEFAULT_MODELS if self.unavailable.get(m) != 'no credits')
+            main_chain, chat_chain = [client], [fast]
+            if not models:
+                return client, fast
         client = cloud_models.FallbackClient(cloud_models.cloud_clients(self.cloud_token, models, max_tokens=4096)
                                              + main_chain, on_switch=switch, recorder=self.recorder, on_failure=self._note_failures)
         fast = cloud_models.FallbackClient(cloud_models.cloud_clients(self.cloud_token, models, max_tokens=1536)

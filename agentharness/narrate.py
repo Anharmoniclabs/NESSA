@@ -17,7 +17,8 @@ TOOL_PHRASES = {
     'dev_stop': 'Stopping {name}', 'dev_health': 'Checking that {name} responds', 'git': 'Checking git {command}',
     'git_commit': 'Committing: "{message}"', 'web_search': 'Searching the web for "{query}"',
     'news_search': 'Looking for news about "{query}"', 'web_fetch': 'Reading {url}', 'weather': 'Checking the weather in {location}',
-    'agent': 'Handing a subtask to the {agent_type} helper', 'use_skill': 'Following the {name} recipe',
+    'agent': 'Handing a subtask to the {agent_type} helper', 'start_work': 'Moving into work mode',
+    'propose_plan': 'Proposing a plan', 'finish': 'Wrapping up', 'respond': 'Answering', 'use_skill': 'Following the {name} recipe',
 }
 
 

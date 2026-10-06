@@ -319,3 +319,13 @@ class ModelPickerTests(unittest.TestCase):
         self.assertEqual(app.model_choice, 'local:nessa-lfm-32k:latest')
         with self.assertRaises(ValueError):
             app.set_model('auto')
+
+    def test_auto_skips_models_known_to_be_out_of_credits(self):
+        app = self.app(cloud=True)
+        app._note_failures(['zai-org/GLM-5.3: HTTP 402: depleted your monthly included credits'])
+        client, _ = app._clients({'max_tokens': 100, 'temperature': 0, 'reasoning_effort': None}, None, None)
+        self.assertNotIn('zai-org/GLM-5.3', [c.model for c in client.clients])
+        for model in ('moonshotai/Kimi-K3', 'deepseek-ai/DeepSeek-V4-Pro-0813'):
+            app._note_failures([model + ': HTTP 402: credits'])
+        client, fast = app._clients({'max_tokens': 100, 'temperature': 0, 'reasoning_effort': None}, None, None)
+        self.assertEqual(client.model, 'nessa-lfm-32k:latest')  # straight to on-device, no cloud round trips
