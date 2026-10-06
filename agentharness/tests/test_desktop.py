@@ -278,6 +278,11 @@ class ModelPickerTests(unittest.TestCase):
         self.root = Path(self.temp.name)
 
     def app(self, cloud):
+        catalog = [dict(id='zai-org/GLM-5.3', context=1048576, providers=['novita']),
+                   dict(id='Qwen/Qwen3-Coder-480B-A35B-Instruct', context=262144, providers=['novita'])]
+        patcher = patch('agentharness.cloud.catalog', return_value=catalog)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         with patch('agentharness.cloud.load_token', return_value='hf_test'):
             return App(self.root / 'sessions', 'http://127.0.0.1:11435/v1', 'nessa-lfm-32k:latest',
                        profile='lfm-32k', cloud=cloud)
@@ -290,6 +295,8 @@ class ModelPickerTests(unittest.TestCase):
         self.assertEqual(choices[0], 'auto')
         self.assertIn('cloud:zai-org/GLM-5.3', choices)
         self.assertIn('local:qwen2.5-coder:3b', choices)
+        self.assertIn('cloud:Qwen/Qwen3-Coder-480B-A35B-Instruct', choices)  # every router model, not just 3
+        self.assertEqual(choices.count('cloud:zai-org/GLM-5.3'), 1)
         self.assertEqual(app.model_choice, 'auto')
 
     def test_choice_persists_and_local_choice_uses_only_that_model(self):
@@ -312,7 +319,7 @@ class ModelPickerTests(unittest.TestCase):
         app._note_failures(['zai-org/GLM-5.3: HTTP 402: You have depleted your monthly included credits'])
         with patch('agentharness.desktop.ChatClient.models', return_value=[]):
             labels = [label for label, _ in app.model_options()]
-        self.assertIn('GLM-5.3 · cloud (no credits)', labels)
+        self.assertIn('★ GLM-5.3 · cloud · 1048K (no credits)', labels)
 
     def test_cloud_choices_refused_when_cloud_is_off(self):
         app = self.app(cloud=False)

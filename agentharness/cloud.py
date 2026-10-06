@@ -13,6 +13,7 @@ in the Authorization header to the router and is never written to logs, sessions
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 from pathlib import Path
@@ -26,6 +27,40 @@ DEFAULT_TOKEN_FILE = Path.home() / "Desktop" / "HF"
 DEFAULT_MODELS = ("zai-org/GLM-5.3", "moonshotai/Kimi-K3", "deepseek-ai/DeepSeek-V4-Pro-0813")
 COOLDOWN = 120.0
 FATAL = ("depleted", "credits", "payment", "http 401", "http 402", "http 403", "not supported by any provider")
+
+
+CATALOG_CACHE = Path.home() / ".agentharness" / "cloud-models.json"
+CATALOG_TTL = 6 * 3600
+
+
+def catalog(token: str, refresh: bool = False) -> list[dict]:
+    """Tool-capable chat models the HF router serves right now: [{id, context, providers}].
+
+    Cached for a few hours; listing models is free and uses no credits.
+    """
+    try:
+        cached = json.loads(CATALOG_CACHE.read_text())
+        if not refresh and time.time() - cached["t"] < CATALOG_TTL:
+            return cached["models"]
+    except (OSError, ValueError, KeyError):
+        cached = None
+    import urllib.request
+    try:
+        req = urllib.request.Request(HF_ROUTER + "/models", headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req, timeout=15) as response:
+            data = json.load(response)
+    except Exception:
+        return cached["models"] if cached else [dict(id=m, context=0, providers=[]) for m in DEFAULT_MODELS]
+    models = []
+    for row in data.get("data", []):
+        live = [p for p in row.get("providers", []) if p.get("status") == "live" and p.get("supports_tools")]
+        if live:
+            models.append(dict(id=row["id"], providers=[p["provider"] for p in live],
+                               context=max(p.get("context_length") or 0 for p in live)))
+    models.sort(key=lambda m: m["id"].lower())
+    CATALOG_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    CATALOG_CACHE.write_text(json.dumps(dict(t=time.time(), models=models)))
+    return models
 
 
 def load_token(path: str | os.PathLike | None = None) -> str:

@@ -147,9 +147,20 @@ class App:
         if self.cloud:
             from . import cloud as cloud_models
             options.append(('Auto · cloud first, on-device fallback', 'auto'))
-            for model in cloud_models.DEFAULT_MODELS:
+            def label(model, context=0):
                 note = self.unavailable.get(model)
-                options.append((model.split('/')[-1] + ' · cloud' + (f' ({note})' if note else ''), 'cloud:' + model))
+                size = f' · {context // 1000}K' if context else ''
+                return model.split('/')[-1] + ' · cloud' + size + (f' ({note})' if note else '')
+            try:
+                listed = cloud_models.catalog(self.cloud_token)
+            except Exception:
+                listed = []
+            contexts = {m['id']: m.get('context', 0) for m in listed}
+            # Recommended first, then every other tool-capable model the router serves.
+            for model in cloud_models.DEFAULT_MODELS:
+                options.append(('★ ' + label(model, contexts.get(model, 0)), 'cloud:' + model))
+            options += [(label(m['id'], m.get('context', 0)), 'cloud:' + m['id'])
+                        for m in listed if m['id'] not in cloud_models.DEFAULT_MODELS]
         try:
             local = ChatClient(self.base_url, self.model, timeout=5, retries=1).models()
         except Exception:
