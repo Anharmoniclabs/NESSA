@@ -6,6 +6,8 @@ Final statuses (exactly one per run):
     unverified      changes made; no failing check, but nothing beyond syntax could confirm them
     improved        checks still fail, but with fewer failures than before the change
     failed_checks   checks fail after all fix attempts
+    completed       changes made and the model declared completion (completion="model");
+                    finish hooks, when configured, passed
     no_change       finished without changing anything
     stalled         no progress (repeated non-edit actions or no tool calls)
     budget_exhausted  step or time budget used up
@@ -26,9 +28,11 @@ from .checks import CheckResult, CheckRunner, detect_checks
 from .context import ProjectInstructions
 from .dev import DevProcessManager
 from .llm import ContextOverflow, ModelError, PartialResponse, Reply, ToolCall
+from .permissions import Permissions
 from .policy import ActionPolicy, apply_policy
 from .skills import SkillRegistry
 from .session import SessionStore, atomic_json, bounded_context
+from . import subagents
 from .tools import build_tools
 from .workspace import ToolError, Workspace
 from . import online
@@ -60,6 +64,20 @@ Call a tool by replying with exactly one JSON object and nothing else:
 {"name": "<tool name>", "arguments": {...}}
 Available tools:
 """
+
+DIRECT_SYSTEM_PROMPT = SYSTEM_PROMPT.replace(
+    """working through tools on a private copy \
+of a project. Nothing you do touches the user's original files; your changes become a patch they review.""",
+    """working through tools directly in the \
+user's project. Edits change the real files; the user's permission mode decides which actions need \
+their approval. A snapshot from the start of the session allows show_diff and undo_file.""").replace(
+    "The controller re-runs the checks; if they fail you will be asked to fix them.",
+    "Configured finish hooks may run; if they fail you will be asked to fix them.")
+DELEGATION_GUIDANCE = """
+Delegation: the agent tool runs a subagent with its own fresh context and returns only its report.
+Use explore for broad searches across many files, plan for designing a multi-file change, and
+general for a self-contained subtask. Give it a complete prompt; it cannot see this conversation.
+Do not delegate a single read or edit you can do directly."""
 
 STUDIO_GUIDANCE = """You can operate AnharmonicStudio through studio_control directly from chat.
 For music production requests, use it to open the app, inspect status, make an editable beat,
@@ -166,6 +184,11 @@ class AgentConfig:
     review_every_edits: int = 2             # only used when a reviewer model is configured
     keep_dev_processes: bool = False        # leave dev processes running for the next turn
     allow_mcp: bool = True                  # connect [mcp.*] servers from agentharness.toml
+    permission_mode: str | None = None      # None: legacy plan approval; or plan/default/accept_edits/bypass
+    completion: str = "checks"              # "checks": verification decides; "model": the model decides
+    finish_hooks: tuple = ()                # checks that must pass before finish in completion="model"
+    allow_subagents: bool = True
+    subagent_max_runs: int = 8              # delegated tasks per run
     explicit: tuple = ()                    # fields set by the caller; agentharness.toml cannot override
 
 
@@ -229,7 +252,8 @@ class Agent:
                  skills: SkillRegistry | None = None,
                  project_instructions: ProjectInstructions | None = None, on_event=None,
                  chat_client=None, conversation_context: str = '',
-                 acceptance_grader: Callable[[Workspace, str, str], dict] | None = None):
+                 acceptance_grader: Callable[[Workspace, str, str], dict] | None = None,
+                 asker=None, subagent_client=None):
         self.client = client
         self.chat_client = chat_client
         self.conversation_context = conversation_context
@@ -251,7 +275,21 @@ class Agent:
             ws.repo, self.project_config.context_max_chars or 12000)
         self.skills = skills or SkillRegistry(ws.repo)
         self.dev = DevProcessManager(ws, self.evidence_dir, self.project_config.dev)
-        self.log = EventLog(self.evidence_dir / "events.jsonl", on_event)
+        self.transcript = subagents.Transcript(self.evidence_dir / "transcript.jsonl")
+
+        def observe(event, data):
+            if event == "message":
+                self.transcript.write(data["message"])
+            if on_event:
+                on_event(event, data)
+        self.log = EventLog(self.evidence_dir / "events.jsonl", observe)
+        self.permissions = (Permissions(self.config.permission_mode, asker)
+                            if self.config.permission_mode else None)
+        if self.config.completion not in ("checks", "model"):
+            raise ValueError("completion must be 'checks' or 'model'")
+        self.subagent_client = subagent_client
+        self.agent_definitions = subagents.load_definitions(ws.repo)
+        self.subagent_runs = 0
         self.store = SessionStore(self.evidence_dir)
         self.plan = None
         self.phase = 'chat' if self.config.conversational else ('plan' if self.config.plan_first else 'execute')
@@ -265,6 +303,10 @@ class Agent:
         self.uncertain_calls = set()
         self.schema_chars = 0
         self.tools = build_tools(self.config.allow_shell, self.config.allow_extract)
+        if not self.config.allow_subagents:
+            self.tools.pop("agent", None)
+        if self.permissions is None:
+            self.tools.pop("git_commit", None)  # the private-copy workflow never commits
         self.mcp = None
         if self.config.allow_mcp and self.project_config.mcp:
             from .mcp import shared_bus
@@ -315,6 +357,35 @@ class Agent:
         if guidance:
             note += f"\nVerification you must demonstrate with evidence (not a registered check): {', '.join(guidance)}"
         return skill.render() + note
+
+    def run_subagent(self, agent_type: str, prompt: str, description: str = "") -> str:
+        definition = self.agent_definitions.get(agent_type)
+        if definition is None:
+            return (f"ERROR: unknown agent type {agent_type!r}. Available:\n"
+                    + subagents.summary(self.agent_definitions))
+        if self.subagent_runs >= self.config.subagent_max_runs:
+            return "ERROR: subagent budget for this run is used up; continue directly."
+        self.subagent_runs += 1
+        client = self.subagent_client or self.client
+        if definition.model and definition.model != getattr(client, "model", ""):
+            from .llm import ChatClient
+            client = ChatClient(getattr(client, "base_url", ""), definition.model,
+                                max_tokens=getattr(client, "max_tokens", 2048))
+        read_only = self.phase in ("plan", "chat") or (self.permissions is not None
+                                                       and self.permissions.mode == "plan")
+        run_id = f"sub-{self.subagent_runs:02d}-{definition.name}"
+        self.log("subagent_started", run_id=run_id, agent_type=definition.name, source=definition.source,
+                 model=getattr(client, "model", None), read_only=read_only, description=description,
+                 prompt=clip(prompt, 2000))
+        sub = subagents.SubagentRun(self, definition, client, prompt, run_id, read_only)
+        started = time.monotonic()
+        try:
+            status, report = sub.run()
+        except Exception as exc:  # a failed delegate is a result for the parent, not a crash
+            status, report = "error", f"{type(exc).__name__}: {exc}"
+        self.log("subagent_finished", run_id=run_id, status=status, steps=sub.steps,
+                 seconds=round(time.monotonic() - started, 3), report=clip(report, 4000))
+        return f"[{definition.name} subagent: {status}, {sub.steps} steps]\n" + subagents.clip_report(report)
 
     def _finish_checks(self) -> tuple:
         """Configured finish checks plus registered checks declared by activated skills."""
@@ -391,15 +462,17 @@ class Agent:
             lines = [f"- {t.name}: {t.description} schema=" + json.dumps(t.schema()["function"]["parameters"])
                      for t in self.tools.values() if offered is None or t.name in offered]
             return CHAT_PROMPT + studio_context + '\nFor tool use only:' + TEXT_MODE_SUFFIX + '\n'.join(lines)
+        base = (DIRECT_SYSTEM_PROMPT if self.ws.direct else SYSTEM_PROMPT) + (
+            DELEGATION_GUIDANCE if "agent" in self.tools else "")
         if self.config.tool_mode != "text":
-            return SYSTEM_PROMPT + "\n\nUse the provided native function tools to act. " \
+            return base + "\n\nUse the provided native function tools to act. " \
                 "A JSON plan or action list in message content does not execute anything. " \
                 "Call one native tool at a time, wait for its result, then choose the next tool. " \
                 "For verification, call run_check with the registered name tests or syntax. " \
                 "Keep explanations brief; never claim an edit or check happened without a tool result." + native_hint
         lines = [f"- {t.name}: {t.description} schema=" + json.dumps(t.schema()["function"]["parameters"])
                  for t in self.tools.values() if offered is None or t.name in offered]
-        return SYSTEM_PROMPT + TEXT_MODE_SUFFIX + "\n".join(lines)
+        return base + TEXT_MODE_SUFFIX + "\n".join(lines)
 
     def _ask(self, offered: list[str]) -> Reply:
         client = self.chat_client if self.phase == 'chat' and self.chat_client is not None else self.client
@@ -542,7 +615,7 @@ class Agent:
 
     # ------------------------------------------------------------ tool dispatch
 
-    def _execute(self, call: ToolCall, offered: list[str]) -> str:
+    def _execute(self, call: ToolCall, offered: list[str], dedupe: bool = True) -> str:
         key = json.dumps([call.name, call.arguments], sort_keys=True, default=str)
         if key in self.uncertain_calls:
             return 'ERROR: this operation has an unknown prior outcome. Inspect evidence; automatic replay is blocked.'
@@ -550,7 +623,7 @@ class Agent:
         tool = self.tools.get(call.name)
         receipt = self.store.begin(call.name, call.arguments, call.id, tool.kind if tool else 'unknown')
         self.log('operation_started', operation_id=receipt['operation_id'], name=call.name)
-        out = self._dispatch(call, offered)
+        out = self._dispatch(call, offered, dedupe)
         status = 'failed' if out.startswith('ERROR:') else 'completed'
         if out.startswith('exit=') and not out.startswith('exit=0\n'):
             status = 'failed'
@@ -562,7 +635,7 @@ class Agent:
         self.log('operation_finished', operation_id=receipt['operation_id'], status=status)
         return out
 
-    def _dispatch(self, call: ToolCall, offered: list[str]) -> str:
+    def _dispatch(self, call: ToolCall, offered: list[str], dedupe: bool = True) -> str:
         tool = self.tools.get(call.name)
         if tool is None or call.name not in offered:
             return f"ERROR: tool {call.name!r} is not available now. Available: {', '.join(offered)}"
@@ -572,13 +645,19 @@ class Agent:
             args = tool.validate(call.arguments)
         except ToolError as exc:
             return f"ERROR: {exc}"
+        if self.permissions is not None:
+            allowed, reason = self.permissions.check(call.name, tool.kind, args)
+            self.log("permission", name=call.name, mode=self.permissions.mode, allowed=allowed,
+                     reason=reason)
+            if not allowed:
+                return "ERROR: " + reason
         key = json.dumps([call.name, args], sort_keys=True, default=str)
-        if tool.kind == "read" and tool.cacheable and self._seen_calls.get(key) == self.generation:
+        if dedupe and tool.kind == "read" and tool.cacheable and self._seen_calls.get(key) == self.generation:
             self.no_progress += 1
             return ("(duplicate: you already made this exact call and nothing has changed since. "
                     "Use that result, or do something different.)")
         self._seen_calls[key] = self.generation
-        before_patch = self.ws.patch() if tool.kind in ("edit", "check", "dev", "mcp") else None
+        before_patch = self.ws.patch() if tool.kind in ("edit", "check", "dev", "mcp", "agent") else None
         try:
             out = tool.handler(self, args)
         except ToolError as exc:
@@ -587,13 +666,13 @@ class Agent:
             out = f"ERROR: {type(exc).__name__}: {exc}"
         self.last_tool = call.name
         edited = before_patch is not None and self.ws.patch() != before_patch
-        progressed = edited or tool.kind in ("check", "dev", "mcp")
+        progressed = edited or tool.kind in ("check", "dev", "mcp", "agent", "git")
         if progressed:
             self.generation += 1
         self.no_progress = 0 if progressed else self.no_progress + 1
         self.log("tool", name=call.name, args={k: clip(str(v), 500) for k, v in args.items()},
                  tool_kind=tool.kind, output=clip(out, 2000))
-        if edited:
+        if edited and tool.kind != "agent":  # a subagent's own edits were verified as they happened
             followup = self._after_edit()
             if followup:
                 out += "\n\n[continuous verification]\n" + followup
@@ -610,6 +689,11 @@ class Agent:
             parts.append("Persistent project instructions:\n" + instructions)
         if self.project_config.path:
             parts.append("Project harness configuration:\n" + self.project_config.describe())
+        if "agent" in self.tools:
+            parts.append("Subagent types for the agent tool:\n" + subagents.summary(self.agent_definitions))
+        if self.ws.direct:
+            parts.append(f"You are editing the project in place. Permission mode: "
+                         f"{self.permissions.mode if self.permissions else 'plan approval'}.")
         if self.mcp is not None:
             parts.append("MCP servers (tools named mcp__SERVER__TOOL):\n" + self.mcp.summary())
         if self.baseline:
@@ -642,7 +726,9 @@ class Agent:
                     results.append((call, 'ERROR: deferred; submit in the next turn'))
                     continue
                 approved_command = False
-                if call.name == 'run_command' and call.name in offered:
+                if call.name == 'run_command' and call.name in offered and self.permissions is not None:
+                    approved_command = True  # the per-call permission check in _dispatch decides
+                elif call.name == 'run_command' and call.name in offered:
                     try:
                         args = self.tools[call.name].validate(call.arguments)
                         plan = {'goal': 'Run the requested local command',
@@ -755,7 +841,7 @@ class Agent:
         return 'stalled', 'I could not produce a reply. Please try again.'
 
     def _plan_round(self) -> dict | None:
-        readers = [n for n, t in self.tools.items() if t.kind == "read" and n not in ASSISTANT_ONLY_TOOLS]
+        readers = [n for n, t in self.tools.items() if t.kind in ("read", "agent") and n not in ASSISTANT_ONLY_TOOLS]
         idle = 0
         for turn in range(self.config.plan_steps + 1):
             if self.elapsed + time.monotonic() - self.started > self.config.time_budget:
@@ -869,6 +955,8 @@ class Agent:
 
     def _finish_gate(self, summary: str = "") -> tuple[str | None, str]:
         """Decide whether a `finish` request is accepted. Returns (final status or None, message)."""
+        if self.config.completion == "model":
+            return self._model_finish(summary)
         changed = self.ws.changed_files()
         if changed:
             self.final = {n: (self.checks.run(n, self.ws) if n in self.checks.checks else
@@ -908,6 +996,25 @@ class Agent:
                           + (f"\nBefore your change: {base}\n" if base else "")
                           + "\nFix the cause (or undo_file a change that broke it), then call finish again.")
         return ("improved" if self._improved() else "failed_checks"), "Stopped: verification still failing."
+
+    def _model_finish(self, summary: str) -> tuple[str | None, str]:
+        """The model decides completion; only configured finish hooks can send it back to work."""
+        changed = self.ws.changed_files()
+        names = [n for n in self.config.finish_hooks]
+        self.final = {n: (self.checks.run(n, self.ws) if n in self.checks.checks else
+                          CheckResult(n, 'error', output='Hook check not registered'))
+                      for n in names} if changed else {}
+        for r in self.final.values():
+            self.log("check", phase="finish_hook", **{**r.to_dict(), "output": clip(r.output, 2000)})
+        self.latest_checks.update({k: v.brief() for k, v in self.final.items()})
+        failing = [r for r in self.final.values() if r.status != 'passed']
+        if failing:
+            report = "\n\n".join(f"{r.brief()}\n{clip(r.output, 3000)}" for r in failing)
+            if self.finish_attempts < self.config.finish_retries:
+                self.finish_attempts += 1
+                return None, f"Not accepted: a finish hook failed.\n{report}\nFix it, then call finish again."
+            return "failed_checks", "Stopped: finish hooks still failing."
+        return ("completed" if changed else "no_change"), "Accepted."
 
     def _improved(self) -> bool:
         before, after = self.baseline.get("tests"), self.final.get("tests")
@@ -1062,6 +1169,8 @@ class Agent:
                          if self.config.conversational else self._intro(task))
                 self.messages = [{'role': 'system', 'content': self._system()},
                                  {'role': 'user', 'content': intro}]
+                for message in self.messages:
+                    self.log('message', message=message)
                 stop = None
             if self.phase == 'chat':
                 if self.config.efficient_chat and self.conversation_context:

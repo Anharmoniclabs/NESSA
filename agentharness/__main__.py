@@ -5,7 +5,11 @@
   extract FILES...        OCR/text + regex fields/tables -> CSV/JSON/Markdown
   config PROJECT [--mcp]  validate agentharness.toml (checks, dev, MCP, telemetry)
   lesson add|list         project-scoped notes injected into future runs
+  transcript WORK         print a run's transcript (main agent and subagents)
   doctor                  check the model server and optional tools
+
+Enterprise-style mode (--enterprise): edit the project in place, ask per action
+(--permission-mode), the model decides completion (--completion model), subagents.
 """
 from __future__ import annotations
 
@@ -51,9 +55,20 @@ def _config(a, **over) -> AgentConfig:
         chosen["full_verify_every_edits"] = max(0, a.full_verify_every_edits)
     if a.review_every_edits is not None:
         chosen["review_every_edits"] = max(1, a.review_every_edits)
+    if getattr(a, "permission_mode", None):
+        over.setdefault("permission_mode", a.permission_mode.replace("-", "_"))
+    if getattr(a, "completion", None):
+        over.setdefault("completion", a.completion)
+    if getattr(a, "finish_hooks", None):
+        over.setdefault("finish_hooks", names(a.finish_hooks))
+    if getattr(a, "no_subagents", False):
+        over.setdefault("allow_subagents", False)
+    compact = PROFILES[a.profile].get("compact_at_tokens",
+                                      6144 if a.profile in ("laptop-i3-12gb", "lfm-i3-12gb") else 22000)
+    plan_first = not a.no_plan and not (getattr(a, "direct", False) and not getattr(a, "plan", False))
     return AgentConfig(max_context_chars=a.max_context_chars, tool_output_chars=a.tool_output_chars,
-                       compact_at_tokens=6144 if a.profile in ("laptop-i3-12gb", "lfm-i3-12gb") else 22000,
-                       max_steps=a.max_steps, plan_first=not a.no_plan, allow_shell=not a.no_shell,
+                       compact_at_tokens=compact,
+                       max_steps=a.max_steps, plan_first=plan_first, allow_shell=not a.no_shell,
                        tool_mode="text" if a.text_tools else "native",
                        baseline_checks=not a.no_baseline, explicit=tuple(chosen), **chosen, **over)
 
@@ -75,6 +90,31 @@ def cli_approver(plan: dict) -> tuple[bool, str]:
     return False, ans
 
 
+def cli_asker(name: str, args: dict) -> tuple[bool, str, bool]:
+    """Per-action permission prompt for --permission-mode default / accept-edits."""
+    print(f"\n=== Permission: {name} ===")
+    for key, value in args.items():
+        text = str(value)
+        print(f"  {key}: {text[:600]}{'…' if len(text) > 600 else ''}")
+    ans = input("Allow? [y] yes / [a] always for this tool / [n] no / or type feedback: ").strip()
+    if ans.lower() in ("y", "yes"):
+        return True, "", False
+    if ans.lower() in ("a", "always"):
+        return True, "", True
+    return False, "" if ans.lower() in ("", "n", "no") else ans, False
+
+
+def _workspace(a, project: Path, work: Path) -> Workspace:
+    return Workspace.direct(project, work) if getattr(a, "direct", False) else Workspace.create(project, work)
+
+
+def _subagent_client(a):
+    if not getattr(a, "subagent_model", ""):
+        return None
+    return ChatClient(a.base_url, a.subagent_model, max_tokens=min(a.max_tokens, 2048),
+                      allow_remote=a.allow_remote, temperature=0.0)
+
+
 def print_event(event, data):
     if event == 'operation_started':
         print(f"[tool] {data['name']}", flush=True)
@@ -87,6 +127,12 @@ def print_event(event, data):
         print('[model] Waiting for local model… (Ctrl+C to cancel)', flush=True)
     elif event == 'model':
         print(f"[model] Reply received in {data['seconds']:.1f}s", flush=True)
+    elif event == 'subagent_started':
+        print(f"[subagent] {data['run_id']} ({data.get('model')}): {data.get('description') or ''}", flush=True)
+    elif event == 'subagent_finished':
+        print(f"[subagent] {data['run_id']} {data['status']} in {data['seconds']:.1f}s", flush=True)
+    elif event == 'permission' and not data.get('allowed'):
+        print(f"[denied] {data['name']}", flush=True)
     elif event == 'context_compacted':
         print(f"[context] {data['before']} -> {data['after']} messages", flush=True)
 
@@ -98,7 +144,7 @@ def cmd_run(a) -> int:
         sys.exit("Give a task string or --task-file.")
     work = Path(a.work or Path.home() / ".agentharness" / "runs" /
                 f"{project.name}-{time.strftime('%Y%m%d-%H%M%S')}")
-    ws = Workspace.create(project, work)
+    ws = _workspace(a, project, work)
     checks = detect_checks(ws.repo)
     for spec in a.check:
         name, _, command = spec.partition("=")
@@ -113,8 +159,9 @@ def cmd_run(a) -> int:
     agent = Agent(_client(a), ws, config=_config(a, require_approval=not a.auto_approve),
                   checks=CheckRunner(checks), approver=None if a.auto_approve else cli_approver,
                   lessons=lessons, reviewer=reviewer,
-                  on_event=print_event if a.progress else None)
-    print(f"Working copy: {ws.repo}\nChecks: {', '.join(checks)}")
+                  on_event=print_event if a.progress else None,
+                  asker=cli_asker, subagent_client=_subagent_client(a))
+    print(f"{'Editing in place' if ws.direct else 'Working copy'}: {ws.repo}\nChecks: {', '.join(checks)}")
     result = agent.run(task)
     print(f"\nStatus: {result.status}  ({result.steps} steps, {result.seconds}s)")
     print("Summary:", result.summary)
@@ -125,7 +172,9 @@ def cmd_run(a) -> int:
     print(f"Patch + evidence: {result.evidence_dir}")
     if result.patch and a.show_diff:
         print("\n" + result.patch)
-    if a.apply and result.patch:
+    if a.apply and result.patch and ws.direct:
+        print("Edits were made in place; nothing to apply.")
+    elif a.apply and result.patch:
         if result.status not in ("verified", "unverified"):
             print(f"Not applying: status is {result.status}.")
         elif input(f"Apply patch to {project}? [y/N] ").strip().lower() == "y":
@@ -137,7 +186,10 @@ def cmd_run(a) -> int:
                 return 1
             subprocess.run(["git", "apply", str(patch_file)], cwd=project, check=True)
             print("Applied. Review with `git diff` in your project.")
-    return 0 if result.status in ("verified", "unverified", "no_change", "answered", "awaiting_input") else 1
+    return 0 if result.status in OK_STATUSES else 1
+
+
+OK_STATUSES = ("verified", "unverified", "completed", "no_change", "answered", "awaiting_input")
 
 
 def cmd_chat(a) -> int:
@@ -145,14 +197,19 @@ def cmd_chat(a) -> int:
     project = Path(a.project).resolve()
     work = Path(a.work or Path.home() / '.agentharness' / 'runs' /
                 f"{project.name}-{time.time_ns()}")
-    ws = Workspace.create(project, work)
+    ws = _workspace(a, project, work)
     checks = CheckRunner(detect_checks(ws.repo))
     cfg = _config(a, require_approval=not a.auto_approve, conversational=True)
     client = _client(a)
     reviewer = Reviewer(ChatClient(a.review_base_url or a.base_url, a.review_model,
                         max_tokens=min(a.max_tokens, 4096), allow_remote=a.allow_remote)) if a.review_model else None
     task, resume, last = '', False, None
-    print(f'NESSA chat | private workspace: {work} | /apply writes accepted changes | /quit to exit')
+    subagent_client = _subagent_client(a)
+    if ws.direct:
+        print(f'NESSA chat | editing {project} in place | mode: {cfg.permission_mode or "plan approval"} '
+              f'| /quit to exit\nTranscript: {work / "evidence" / "transcript.jsonl"}')
+    else:
+        print(f'NESSA chat | private workspace: {work} | /apply writes accepted changes | /quit to exit')
     while True:
         try:
             message = input('you> ').strip()
@@ -164,7 +221,10 @@ def cmd_chat(a) -> int:
         if not message:
             continue
         if message == '/apply':
-            if last is None or last.status not in ('verified', 'unverified'):
+            if ws.direct:
+                print('Edits are already in the project (direct mode).')
+                continue
+            if last is None or last.status not in ('verified', 'unverified', 'completed'):
                 print('Nothing to apply: only verified or unverified results can be applied.')
                 continue
             if input(f'Write {", ".join(ws.changed_files())} into {project}? [y/N] ').strip().lower() != 'y':
@@ -179,7 +239,8 @@ def cmd_chat(a) -> int:
         agent = Agent(client, ws, config=cfg, checks=checks,
                       approver=cli_approver if cfg.require_approval else None,
                       on_event=print_event, reviewer=reviewer,
-                      lessons=LessonStore().relevant(str(project), message))
+                      lessons=LessonStore().relevant(str(project), message),
+                      asker=cli_asker, subagent_client=subagent_client)
         result = last = agent.run(task, resume=resume, message=message if resume else '')
         print(f'nessa> {result.summary}', flush=True)
         if result.status not in ('answered', 'awaiting_input'):
@@ -191,25 +252,50 @@ def cmd_chat(a) -> int:
 
 def cmd_resume(a) -> int:
     work = Path(a.work).resolve()
-    if not (work / 'repo').is_dir() or not (work / 'baseline').is_dir():
-        raise ValueError('Resume requires the existing private repo and baseline directories')
+    ws = Workspace.open(work)
+    if not ws.repo.is_dir() or not ws.baseline.is_dir():
+        raise ValueError('Resume requires the existing project/private repo and baseline directories')
     saved = SessionStore(work / 'evidence').load()
     cfg = AgentConfig(**saved['config'])
     if a.extra_steps < 0 or a.extra_seconds < 0:
         raise ValueError('Additional budgets must be non-negative')
     cfg.max_steps += a.extra_steps
     cfg.time_budget += a.extra_seconds
-    ws = Workspace(work)
     checks = detect_checks(ws.repo)
     checks.update(saved.get('check_commands', {}))
     for name in saved.get('check_names', []):
         if name not in checks:
             checks[name] = lambda ws, name=name: CheckResult(name, 'error', output='Check implementation unavailable after restart')
     agent = Agent(_client(a), ws, config=cfg, checks=CheckRunner(checks),
-                  approver=cli_approver if cfg.require_approval else None)
+                  approver=cli_approver if cfg.require_approval else None, asker=cli_asker)
     result = agent.run(saved['task'], resume=True, message=a.message)
     print(f'Status: {result.status}\n{result.summary}\nPatch + evidence: {result.evidence_dir}')
-    return 0 if result.status in ('verified', 'unverified', 'no_change', 'answered', 'awaiting_input') else 1
+    return 0 if result.status in OK_STATUSES else 1
+
+
+def cmd_transcript(a) -> int:
+    from .subagents import Transcript
+    path = Path(a.work).resolve() / 'evidence' / 'transcript.jsonl'
+    rows = Transcript(path).read()
+    if not rows:
+        print(f'No transcript at {path}')
+        return 1
+    for row in rows:
+        if a.agent and row.get('agent') != a.agent:
+            continue
+        who = row.get('agent', 'main')
+        role = row.get('role', '?')
+        if role == 'system' and not a.full:
+            continue
+        text = str(row.get('content') or '')
+        calls = row.get('tool_calls') or []
+        if calls:
+            text += ' '.join(f"\n  -> {c['function']['name']}({c['function']['arguments'][:200]})" for c in calls)
+        if not a.full and len(text) > 800:
+            text = text[:800] + ' …'
+        label = f"{role}:{row['name']}" if role == 'tool' else role
+        print(f"[{who}] {label}: {text}")
+    return 0
 
 
 def cmd_batch(a) -> int:
@@ -341,6 +427,21 @@ def main(argv=None) -> int:
                         help="reviewer model server; defaults to --base-url")
         sp.add_argument("--review-every-edits", type=int, default=None,
                         help="ask reviewer for notes every N successful edits")
+        sp.add_argument("--direct", action="store_true",
+                        help="edit the project in place (a start snapshot keeps diff/undo)")
+        sp.add_argument("--plan", action="store_true", help="with --direct: still require plan approval first")
+        sp.add_argument("--permission-mode", choices=("plan", "default", "accept-edits", "bypass"), default=None,
+                        help="per-action permissions: plan=read-only, default=ask for changes, "
+                             "accept-edits=edits free/commands ask, bypass=never ask")
+        sp.add_argument("--completion", choices=("checks", "model"), default=None,
+                        help="checks: verification decides done (default); model: the model decides")
+        sp.add_argument("--finish-hooks", default=None,
+                        help="with --completion model: checks that must pass before finish, e.g. tests")
+        sp.add_argument("--subagent-model", default=os.environ.get("AGENT_SUBAGENT_MODEL", ""),
+                        help="model for subagents (e.g. a small specialist); default: the main model")
+        sp.add_argument("--no-subagents", action="store_true", help="disable the agent tool")
+        sp.add_argument("--enterprise", action="store_true",
+                        help="preset: --direct --permission-mode default --completion model")
 
     r = sub.add_parser("run", help="work on a project")
     r.add_argument("project")
@@ -412,6 +513,12 @@ def main(argv=None) -> int:
     l.add_argument("text", nargs="?", default="")
     l.set_defaults(fn=cmd_lesson)
 
+    t = sub.add_parser("transcript", help="print a run's conversation transcript")
+    t.add_argument("work", help="the run's work directory")
+    t.add_argument("--agent", help="only this agent, e.g. main or sub-01-explore")
+    t.add_argument("--full", action="store_true", help="include system prompts and untruncated text")
+    t.set_defaults(fn=cmd_transcript)
+
     d = sub.add_parser("doctor", help="check setup")
     model_args(d)
     d.set_defaults(fn=cmd_doctor)
@@ -419,6 +526,12 @@ def main(argv=None) -> int:
     a = p.parse_args(argv)
     if hasattr(a, "profile"):
         apply_profile(a)
+    if getattr(a, "enterprise", False):
+        a.direct = True
+        a.permission_mode = a.permission_mode or "default"
+        a.completion = a.completion or "model"
+    if getattr(a, "direct", False) and not getattr(a, "permission_mode", None):
+        a.permission_mode = "default"  # in-place edits always go through per-action permissions
     return a.fn(a)
 
 

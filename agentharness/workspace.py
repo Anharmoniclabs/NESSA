@@ -4,6 +4,10 @@ Layout of a work directory:
     baseline/  untouched copy used for diffs and undo
     repo/      the copy the agent reads, edits and tests
 The final result is a unified diff (baseline -> repo) that applies with `git apply`.
+
+Direct mode (Workspace.direct) edits the user's project in place, like enterprise CLI agents:
+    repo      is the user's project itself
+    baseline/ is a snapshot taken when the session started, kept for diffs, undo and evidence
 """
 from __future__ import annotations
 
@@ -55,9 +59,10 @@ def iter_files(root: Path):
 
 
 class Workspace:
-    def __init__(self, work_dir: Path):
+    def __init__(self, work_dir: Path, repo: Path | None = None):
         self.work_dir = Path(work_dir).resolve()
-        self.repo = self.work_dir / "repo"
+        self.repo = Path(repo).resolve() if repo else self.work_dir / "repo"
+        self.direct = repo is not None
         self.baseline = self.work_dir / "baseline"
         self.journal: list[dict] = []
         self._seen: dict[str, str] = {}  # rel path -> sha of the version the agent last read
@@ -77,6 +82,29 @@ class Workspace:
         shutil.copytree(source, ws.baseline, symlinks=True,
                         ignore=shutil.ignore_patterns(*SCAN_SKIP, "*.pyc"))
         return ws
+
+    @classmethod
+    def direct(cls, source: Path, work_dir: Path) -> "Workspace":
+        """Edit `source` in place; only the baseline snapshot lives in `work_dir`."""
+        source, work_dir = Path(source).resolve(), Path(work_dir).resolve()
+        if not source.is_dir():
+            raise FileNotFoundError(f"Project folder not found: {source}")
+        if work_dir == source or source in work_dir.parents:
+            raise ValueError("The work directory must be outside the project folder.")
+        if any((work_dir / name).exists() for name in ('repo', 'baseline', 'evidence')):
+            raise FileExistsError(f'Work directory is not empty: {work_dir}; use resume or a new directory')
+        ws = cls(work_dir, repo=source)
+        shutil.copytree(source, ws.baseline, symlinks=True,
+                        ignore=shutil.ignore_patterns(*SCAN_SKIP, "*.pyc"))
+        (work_dir / "DIRECT").write_text(str(source))
+        return ws
+
+    @classmethod
+    def open(cls, work_dir: Path) -> "Workspace":
+        """Reopen a private or direct workspace for resume."""
+        work_dir = Path(work_dir).resolve()
+        marker = work_dir / "DIRECT"
+        return cls(work_dir, repo=Path(marker.read_text().strip())) if marker.is_file() else cls(work_dir)
 
     # ------------------------------------------------------------ paths
 
@@ -286,6 +314,8 @@ class Workspace:
         new baseline: a later patch contains only newer work.
         """
         project = Path(project).resolve()
+        if self.direct and project == self.repo:
+            return []  # edits are already in the project
         if not project.is_dir():
             raise ToolError(f"Project folder not found: {project}")
         changed = self.changed_files()

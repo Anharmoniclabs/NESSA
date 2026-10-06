@@ -1,6 +1,7 @@
 """Tool registry. Each tool: JSON schema for the model + handler + a kind the controller uses.
 
 kinds:  read (no side effects) | edit (changes the snapshot) | check | control
+        git (commits) | agent (delegates to a subagent with its own context)
 """
 from __future__ import annotations
 
@@ -8,6 +9,7 @@ import glob as globlib
 import os
 import json
 import shutil
+import subprocess
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass
@@ -174,6 +176,21 @@ def build_tools(allow_shell: bool = True, allow_extract: bool = True) -> dict[st
         Tool('dev_wait', 'Wait up to 10 seconds for a named process. Returns pending or exit status and bounded logs.',
              {'name': S, 'seconds': I}, ('name',), 'read',
              handler=lambda c,a: c.dev.wait(a['name'], a.get('seconds', 1)), cacheable=False),
+        Tool("git", "Read-only git: status, diff, log, show, blame, branch, ls-files, rev-parse. "
+             "`args` are passed after the subcommand, e.g. [\"--stat\"] or [\"-n\", \"5\"].",
+             {"command": {**S, "enum": sorted(GIT_READ)}, "args": {"type": "array", "items": S}},
+             ("command",), "read", handler=lambda c, a: _git(c, a), cacheable=False),
+        Tool("git_commit", "Stage files and create a git commit in the project. Requires permission. "
+             "Omit paths to commit every file changed this session.",
+             {"message": S, "paths": {"type": "array", "items": S}}, ("message",), "git",
+             handler=lambda c, a: _git_commit(c, a), cacheable=False),
+        Tool("agent", "Delegate a self-contained task to a subagent with its own fresh context. It returns "
+             "only its final report, keeping your context small. Types: explore (find code, read-only), "
+             "plan (design an approach, read-only), general (multi-step work), or a custom agent name. "
+             "Give it everything it needs in prompt; it cannot see your conversation.",
+             {"agent_type": S, "prompt": S, "description": S}, ("agent_type", "prompt"), "agent",
+             handler=lambda c, a: c.run_subagent(a["agent_type"], a["prompt"], a.get("description", "")),
+             cacheable=False),
         Tool("dev_stop", "Stop a managed local development process.",
              {"name": S}, ("name",), "dev", handler=lambda c, a: c.dev.stop(a["name"])),
     ]
@@ -217,6 +234,51 @@ def build_tools(allow_shell: bool = True, allow_extract: bool = True) -> dict[st
     if not allow_shell:
         tools = [t for t in tools if t.name != 'dev_start']
     return {t.name: t for t in tools}
+
+
+GIT_READ = frozenset({"status", "diff", "log", "show", "blame", "branch", "ls-files", "rev-parse"})
+# Options that write files or run programs even under a read-only subcommand.
+GIT_UNSAFE_ARGS = ("--output", "-o", "--ext-diff", "--exec", "-c", "--delete", "-d", "-D", "-m", "-M",
+                   "--move", "--copy", "-C", "--set-upstream-to", "-u", "--edit-description", "--force", "-f")
+
+
+def _git_run(ctx, argv: list[str], timeout: int = 60) -> tuple[int, str]:
+    if not (ctx.ws.repo / ".git").exists():
+        raise ToolError("The project is not a git repository (or this is a private copy without .git). "
+                        "Use show_diff for session changes.")
+    try:
+        r = subprocess.run(["git", "-c", "core.pager=cat", "--no-pager", *argv], cwd=ctx.ws.repo,
+                           capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    except FileNotFoundError:
+        raise ToolError("git is not installed.")
+    except subprocess.TimeoutExpired:
+        raise ToolError(f"git timed out after {timeout}s.")
+    return r.returncode, (r.stdout + r.stderr)[-12000:]
+
+
+def _git(ctx, args) -> str:
+    extra = args.get("args", [])
+    bad = [x for x in extra if x.split("=")[0] in GIT_UNSAFE_ARGS]
+    if bad:
+        raise ToolError(f"Not allowed in read-only git: {', '.join(bad)}")
+    code, out = _git_run(ctx, [args["command"], *extra])
+    return f"exit={code}\n{out}" if code else (out or "(no output)")
+
+
+def _git_commit(ctx, args) -> str:
+    paths = args.get("paths") or ctx.ws.changed_files()
+    if not paths:
+        raise ToolError("Nothing to commit: no files changed this session.")
+    for path in paths:
+        ctx.ws.path(path)  # refuses paths outside the project
+    code, out = _git_run(ctx, ["add", "-A", "--", *paths])
+    if code:
+        raise ToolError("git add failed:\n" + out)
+    code, out = _git_run(ctx, ["commit", "-m", args["message"], "--", *paths])
+    if code:
+        raise ToolError("git commit failed:\n" + out)
+    _, head = _git_run(ctx, ["rev-parse", "--short", "HEAD"])
+    return f"ok: committed {len(paths)} file(s) as {head.strip()}\n{out[-2000:]}"
 
 
 def _shell(ctx, args) -> str:
