@@ -30,7 +30,7 @@ from .dev import DevProcessManager
 from .llm import ContextOverflow, ModelError, PartialResponse, Reply, ToolCall
 from .permissions import Permissions
 from .policy import ActionPolicy, apply_policy
-from .skills import SkillRegistry
+from .skills import SCAFFOLD_RECIPE, SkillRegistry
 from .session import SessionStore, atomic_json, bounded_context
 from . import subagents
 from .tools import build_tools
@@ -405,9 +405,17 @@ class Agent:
             names += [c for c in context.get('enforced_checks', []) if c in self.checks.checks]
         return tuple(dict.fromkeys(names))
 
+    def _refresh_checks(self) -> None:
+        """Register checks that became detectable during the run (e.g. tests the agent wrote)."""
+        found = {k: v for k, v in detect_checks(self.ws.repo).items() if k not in self.checks.checks}
+        if found:
+            self.checks.checks.update(found)
+            self.log("checks_detected", names=sorted(found))
+
     def _after_edit(self) -> str:
         """Checkpoint and verify continuously after a successful repository mutation."""
         self.edit_count += 1
+        self._refresh_checks()
         reports: list[str] = []
         patch = self.ws.patch()
         if self.config.checkpoint_every_edit:
@@ -692,7 +700,8 @@ class Agent:
     # ------------------------------------------------------------ phases
 
     def _intro(self, task: str) -> str:
-        parts = [f"Task:\n{task.strip()}", f"Project files:\n{self.ws.list_dir('.', 2)}",
+        files = self.ws.list_dir('.', 2)
+        parts = [f"Task:\n{task.strip()}", f"Project files:\n{files}",
                  f"Registered checks for run_check: {', '.join(self.checks.names()) or 'none'}",
                  "Available micro-harness skills:\n" + self.skills.summary()]
         instructions = self.project_instructions.root_context()
@@ -700,6 +709,8 @@ class Agent:
             parts.append("Persistent project instructions:\n" + instructions)
         if self.project_config.path:
             parts.append("Project harness configuration:\n" + self.project_config.describe())
+        if files == "(empty)":
+            parts.append("The project folder is empty, so this is a new project.\n" + SCAFFOLD_RECIPE)
         if "agent" in self.tools:
             parts.append("Subagent types for the agent tool:\n" + subagents.summary(self.agent_definitions))
         if self.ws.direct:
@@ -1018,10 +1029,14 @@ class Agent:
     def _model_finish(self, summary: str) -> tuple[str | None, str]:
         """The model decides completion; only configured finish hooks can send it back to work."""
         changed = self.ws.changed_files()
-        names = [n for n in self.config.finish_hooks]
-        self.final = {n: (self.checks.run(n, self.ws) if n in self.checks.checks else
-                          CheckResult(n, 'error', output='Hook check not registered'))
-                      for n in names} if changed else {}
+        self._refresh_checks()
+        # A hook whose check does not exist (e.g. tests in a project without tests) cannot run;
+        # it is reported, not treated as passing or failing.
+        names = [n for n in self.config.finish_hooks if n in self.checks.checks]
+        skipped = [n for n in self.config.finish_hooks if n not in self.checks.checks]
+        if skipped:
+            self.log("finish_hooks_skipped", names=skipped, reason="check not available in this project")
+        self.final = {n: self.checks.run(n, self.ws) for n in names} if changed else {}
         for r in self.final.values():
             self.log("check", phase="finish_hook", **{**r.to_dict(), "output": clip(r.output, 2000)})
         self.latest_checks.update({k: v.brief() for k, v in self.final.items()})

@@ -87,7 +87,28 @@ BUILTINS = {
         (),
         ("architecture", "lint", "tests"),
     ),
+    "scaffold-project": Skill(
+        "scaffold-project",
+        "Create a new application or game as a complete project: package, modules, tests, README, launch.",
+        """Build a complete, runnable project, not a single script. Use Python and the standard library
+unless the user asks otherwise.
+1. Layout: README.md (what it is, how to run, how to test); a package directory named after the
+   project with focused modules (data models, core rules/engine, players or services, user interface,
+   __main__.py entry point); tests/ with unittest tests for the core logic; requirements.txt only
+   when third-party packages are truly needed; a one-line run command (python -m <package>).
+2. Interactive programs and games get a GUI (tkinter); they cannot read terminal input when launched.
+3. Work in small steps: one file per write_file call, each under about 150 lines. Write the core
+   models and rules first, then their tests, and run_check tests until they pass.
+4. Then write the interface and entry point, run_check syntax, and launch with dev_start
+   (argv like ["python3", "-m", "<package>"]). Confirm with dev_status and dev_logs.
+5. Finish with how to run and test it, and what is not implemented yet.""",
+        ("list_dir", "write_file", "read_file", "run_check", "dev_start", "dev_status", "dev_logs"),
+        (),
+        ("tests",),
+    ),
 }
+
+SCAFFOLD_RECIPE = BUILTINS["scaffold-project"].instructions
 
 
 class SkillRegistry:

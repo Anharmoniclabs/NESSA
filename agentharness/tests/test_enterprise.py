@@ -232,3 +232,38 @@ class ChatRouting(Base):
         agent = self.agent(["Here is a short poem."], conversational=True, efficient_chat=True)
         result = agent.run("write me a poem")
         self.assertEqual(result.status, "answered")
+
+
+class Scaffolding(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        (self.tmp / "empty").mkdir()
+        self.ws = Workspace.direct(self.tmp / "empty", self.tmp / "work")
+
+    def agent(self, steps, **cfg):
+        self.client = ScriptedClient(steps)
+        config = AgentConfig(require_approval=False, plan_first=False, permission_mode="bypass",
+                             completion="model", finish_hooks=("tests",), **cfg)
+        return Agent(self.client, self.ws, config=config, checks=CheckRunner({"syntax": syntax_check}))
+
+    def test_empty_folder_gets_the_project_recipe(self):
+        self.agent([[("finish", {"summary": "x"})]]).run("build a spades card game")
+        intro = json.dumps(self.client.seen[0][0])
+        self.assertIn("complete, runnable project", intro)
+        self.assertIn("one file per write_file call", intro)
+
+    def test_tests_written_during_the_run_must_pass_before_finishing(self):
+        bad_test = ("import unittest\nclass T(unittest.TestCase):\n"
+                    "    def test_x(self):\n        self.assertEqual(1, 2)\n")
+        steps = [[("write_file", {"path": "game/__init__.py", "content": ""})],
+                 [("write_file", {"path": "tests/__init__.py", "content": ""})],
+                 [("write_file", {"path": "tests/test_rules.py", "content": bad_test})],
+                 [("finish", {"summary": "done"})]]
+        result = self.agent(steps, finish_retries=0).run("build a game")
+        self.assertEqual(result.status, "failed_checks")  # the new tests were found and enforced
+
+    def test_project_without_tests_can_still_finish(self):
+        result = self.agent([[("write_file", {"path": "main.py", "content": "print(1)\n"})],
+                             [("finish", {"summary": "done"})]]).run("write a script")
+        self.assertEqual(result.status, "completed")

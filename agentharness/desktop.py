@@ -341,7 +341,7 @@ class App:
             enterprise = {}
             if ws.direct:
                 enterprise = dict(permission_mode='default', completion='model', plan_first=False,
-                                  finish_hooks=('tests',) if 'tests' in checks.checks else ())
+                                  finish_hooks=('tests',))  # runs once the project has tests
             cfg = AgentConfig(conversational=True, efficient_chat=True, require_approval=True,
                               studio_context=chat.data.get('studio_last_result', ''),
                               tool_mode='text' if profile['text_tools'] else 'native',
