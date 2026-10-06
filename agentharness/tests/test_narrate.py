@@ -27,6 +27,8 @@ class Narration(unittest.TestCase):
                     {'event': 'check', 'data': {'name': 'syntax', 'status': 'passed'}}]
         self.assertEqual(narrate.latest_reasoning(activity), 'I should write a tkinter game.')
         self.assertEqual(narrate.feed(activity), ['  ↳ syntax check passed'])
+        activity.append({'event': 'model', 'data': {'calls': [{'name': 'dev_start', 'args': {}}]}})
+        self.assertEqual(narrate.latest_reasoning(activity), 'I should write a tkinter game.')
         self.assertTrue(narrate.latest_reasoning([{'event': 'model', 'data': {'reasoning': 'x ' * 500}}]).endswith('…'))
 
 

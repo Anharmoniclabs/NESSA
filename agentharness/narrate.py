@@ -72,8 +72,8 @@ def narrate(event: str, data: dict) -> str | None:
 def latest_reasoning(activity: list[dict], limit: int = 600) -> str:
     """The model's own reasoning from its most recent reply, when the model provides one."""
     for entry in reversed(activity):
-        if entry.get('event') == 'model':
-            text = str((entry.get('data') or {}).get('reasoning') or '').strip()
+        text = str((entry.get('data') or {}).get('reasoning') or '').strip() if entry.get('event') == 'model' else ''
+        if text:  # replies that only call a tool often carry no reasoning; keep the latest that does
             return text if len(text) <= limit else text[:limit].rsplit(' ', 1)[0] + '…'
     return ''
 

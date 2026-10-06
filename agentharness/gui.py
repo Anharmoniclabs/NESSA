@@ -13,24 +13,47 @@ from pathlib import Path
 from . import narrate
 from .desktop import App
 
-BG = '#202022'
-PANEL = '#19191b'
-SURFACE = '#2b2b2f'
-TEXT = '#eeece8'
-MUTED = '#9b999f'
-ACCENT = '#d4c4f5'
-BORDER = '#3c3b40'
-FONT = 'DejaVu Sans'
+BRAND = Path(__file__).resolve().parents[1] / 'brand'
+# NESSA identity: ink surfaces, a violet→cyan "resonance" accent, semantic status colours.
+BG = '#0F1115'        # ink
+PANEL = '#0B0D11'     # deep ink (sidebar)
+SURFACE = '#171B22'   # raised surface
+RAISED = '#1F242D'    # hover / chips
+TEXT = '#E8EAED'
+MUTED = '#8A93A0'
+FAINT = '#5D6571'
+ACCENT = '#8B7CFF'    # resonance violet
+SIGNAL = '#4FD8C4'    # signal cyan
+OK = '#5BD6A0'
+WARN = '#F5B454'
+ERROR = '#F2777A'
+BORDER = '#262C36'
+FONT = 'Inter'
+DISPLAY = 'Inter Display'
+MONO = 'JetBrains Mono'
+
+
+def brand_image(name):
+    """Brand PNG as a Tk image, or None when the asset is missing (the UI falls back to text)."""
+    path = BRAND / name
+    try:
+        return tk.PhotoImage(file=str(path)) if path.exists() else None
+    except tk.TclError:
+        return None
 
 
 class RoundedSurface(tk.Canvas):
     """Resizable native-Tk surface with a rounded border and child content."""
-    def __init__(self, parent, color=SURFACE, radius=22, **kwargs):
-        super().__init__(parent, bg=BG, highlightthickness=0, **kwargs)
-        self.color, self.radius = color, radius
+    def __init__(self, parent, color=SURFACE, radius=20, outline=BORDER, **kwargs):
+        super().__init__(parent, bg=parent['bg'] if 'bg' in parent.keys() else BG, highlightthickness=0, **kwargs)
+        self.color, self.radius, self.outline = color, radius, outline
         self.body = tk.Frame(self, bg=color)
-        self.window = self.create_window(14, 12, anchor='nw', window=self.body)
+        self.window = self.create_window(16, 12, anchor='nw', window=self.body)
         self.bind('<Configure>', self.resize)
+
+    def set_outline(self, color):
+        self.outline = color
+        self.itemconfigure('surface', outline=color)
 
     def resize(self, event):
         w, h, r = event.width-1, event.height-1, self.radius
@@ -38,9 +61,13 @@ class RoundedSurface(tk.Canvas):
                   r, h, 1, h, 1, h-r, 1, r, 1, 1]
         self.delete('surface')
         self.create_polygon(points, smooth=True, splinesteps=24, fill=self.color,
-                            outline=BORDER, tags='surface')
+                            outline=self.outline, tags='surface')
         self.tag_lower('surface')
-        self.itemconfigure(self.window, width=max(1, w-28), height=max(1, h-24))
+        self.itemconfigure(self.window, width=max(1, w-32), height=max(1, h-24))
+
+
+def chip(parent, text, fg=MUTED, bg=RAISED):
+    return tk.Label(parent, text=text, bg=bg, fg=fg, font=(FONT, 8, 'bold'), padx=9, pady=4)
 
 
 class Window:
@@ -53,142 +80,224 @@ class Window:
         self.creating = False
         self.creation = queue.Queue()
         self.drafts = {}
+        self.cloud = bool(getattr(app, 'cloud', False))
+        self.enterprise = bool(getattr(app, 'enterprise', False))
         root.title('Nessa')
-        root.geometry('1200x840')
-        root.minsize(780, 620)
+        root.geometry('1240x860')
+        root.minsize(820, 640)
         root.configure(bg=BG)
         root.protocol('WM_DELETE_WINDOW', self.close)
+        self.icons = [img for img in (brand_image(f'icon-{s}.png') for s in (256, 128, 64, 48, 32)) if img]
+        if self.icons:
+            root.iconphoto(True, *self.icons)
+        self.glyph_small = brand_image('glyph-22.png')
+        self.glyph_side = brand_image('glyph-28.png')
+        self.glyph_hero = brand_image('glyph-96.png')
         style = ttk.Style(root)
         style.theme_use('clam')
         style.configure('TFrame', background=BG)
         style.configure('TLabel', background=BG, foreground=TEXT, font=(FONT, 10))
-        style.configure('TButton', background=SURFACE, foreground=TEXT, padding=(13, 9), borderwidth=0, font=(FONT, 10))
-        style.map('TButton', background=[('active', '#38383d'), ('disabled', SURFACE)], foreground=[('disabled', '#737178')])
-        style.configure('Ghost.TButton', background=BG, foreground=MUTED)
+        style.configure('TButton', background=SURFACE, foreground=TEXT, padding=(14, 9), borderwidth=0,
+                        font=(FONT, 10), focuscolor=SURFACE)
+        style.map('TButton', background=[('active', RAISED), ('disabled', SURFACE)], foreground=[('disabled', FAINT)])
+        style.configure('Ghost.TButton', background=BG, foreground=MUTED, padding=(12, 7))
         style.map('Ghost.TButton', background=[('active', SURFACE)], foreground=[('active', TEXT)])
-        style.configure('Side.TButton', background=PANEL, anchor='w', padding=(12, 11))
-        style.map('Side.TButton', background=[('active', SURFACE)])
-        style.configure('Accent.TButton', background=ACCENT, foreground='#26222d', padding=(14, 8))
-        style.map('Accent.TButton', background=[('active', '#e3d8fa'), ('disabled', '#49434f')], foreground=[('disabled', MUTED)])
+        style.configure('Side.TButton', background=PANEL, foreground='#C9CED6', anchor='w', padding=(12, 10))
+        style.map('Side.TButton', background=[('active', SURFACE)], foreground=[('active', TEXT)])
+        style.configure('Primary.TButton', background=ACCENT, foreground='#0F1115', anchor='w', padding=(12, 10),
+                        font=(FONT, 10, 'bold'))
+        style.map('Primary.TButton', background=[('active', '#A398FF'), ('disabled', '#3A3560')])
+        style.configure('Accent.TButton', background=ACCENT, foreground='#0F1115', padding=(14, 8), font=(FONT, 10, 'bold'),
+                        focuscolor=ACCENT)
+        style.map('Accent.TButton', background=[('active', '#A398FF'), ('disabled', '#2E2A4D')], foreground=[('disabled', FAINT)])
+        style.configure('Warn.TButton', background=WARN, foreground='#1A1408', padding=(14, 8), font=(FONT, 10, 'bold'),
+                        focuscolor=WARN)
+        style.map('Warn.TButton', background=[('active', '#F8C676')])
+        style.configure('Suggest.TButton', background=SURFACE, foreground='#C9CED6', padding=(16, 12), font=(FONT, 10))
+        style.map('Suggest.TButton', background=[('active', RAISED)], foreground=[('active', TEXT)])
         style.configure('TNotebook', background=BG, borderwidth=0)
-        style.configure('TNotebook.Tab', background=PANEL, foreground=TEXT, padding=(15, 8))
-        style.map('TNotebook.Tab', background=[('selected', SURFACE)])
-        style.configure('Vertical.TScrollbar', background=SURFACE, troughcolor=BG, borderwidth=0, arrowsize=10)
+        style.configure('TNotebook.Tab', background=PANEL, foreground=MUTED, padding=(16, 8), font=(FONT, 10))
+        style.map('TNotebook.Tab', background=[('selected', SURFACE)], foreground=[('selected', TEXT)])
+        # Slim, arrowless scrollbar in brand colours.
+        style.layout('Vertical.TScrollbar', [('Vertical.Scrollbar.trough', {'sticky': 'ns', 'children': [
+            ('Vertical.Scrollbar.thumb', {'expand': '1', 'sticky': 'nswe'})]})])
+        style.configure('Vertical.TScrollbar', background=RAISED, troughcolor=BG, borderwidth=0, relief='flat',
+                        bordercolor=BG, lightcolor=RAISED, darkcolor=RAISED, gripcount=0, width=8)
+        style.map('Vertical.TScrollbar', background=[('active', '#2D3440')])
         root.columnconfigure(1, weight=1)
         root.rowconfigure(0, weight=1)
-        self.sidebar = tk.Frame(root, bg=PANEL, width=238, padx=16, pady=22)
+
+        # ---- sidebar: brand, actions, history, connection status
+        self.sidebar = tk.Frame(root, bg=PANEL, width=256, padx=16, pady=20)
         self.sidebar.grid(row=0, column=0, sticky='nsew')
         self.sidebar.grid_propagate(False)
+        tk.Frame(root, bg=BORDER, width=1).grid(row=0, column=0, sticky='nse')
         brand = tk.Frame(self.sidebar, bg=PANEL)
-        brand.pack(fill='x', pady=(0, 26))
-        tk.Label(brand, text='✳', bg=PANEL, fg=ACCENT, font=(FONT, 24)).pack(side='left')
-        tk.Label(brand, text='nessa', bg=PANEL, fg=TEXT, font=(FONT, 20, 'bold')).pack(side='left', padx=8)
-        self.new_button = ttk.Button(self.sidebar, text='+   New chat', style='Side.TButton', command=self.new)
+        brand.pack(fill='x', pady=(2, 24), padx=6)
+        if self.glyph_side:
+            tk.Label(brand, image=self.glyph_side, bg=PANEL).pack(side='left')
+        else:
+            tk.Label(brand, text='N', bg=PANEL, fg=ACCENT, font=(DISPLAY, 18, 'bold')).pack(side='left')
+        tk.Label(brand, text='nessa', bg=PANEL, fg=TEXT, font=(DISPLAY, 19, 'bold')).pack(side='left', padx=(10, 0))
+        self.new_button = ttk.Button(self.sidebar, text='+   New chat', style='Primary.TButton', command=self.new)
         self.new_button.pack(fill='x')
-        self.project_button = ttk.Button(self.sidebar, text='↗   Project chat', style='Side.TButton', command=self.project_chat)
-        self.project_button.pack(fill='x', pady=(3, 22))
+        self.project_button = ttk.Button(self.sidebar, text='▸   Open a project', style='Side.TButton',
+                                         command=self.project_chat)
+        self.project_button.pack(fill='x', pady=(6, 20))
         self.search = tk.StringVar()
-        tk.Label(self.sidebar, text='Search conversations', bg=PANEL, fg=MUTED, font=(FONT, 9)).pack(anchor='w', padx=10, pady=(0, 8))
-        search = tk.Entry(self.sidebar, textvariable=self.search, bg='#242426', fg=TEXT, insertbackground=TEXT,
-                          relief='flat', font=(FONT, 10), highlightthickness=1, highlightbackground='#303034')
-        search.pack(fill='x', ipady=7)
+        search_box = tk.Frame(self.sidebar, bg=SURFACE, highlightthickness=1, highlightbackground=BORDER)
+        search_box.pack(fill='x')
+        tk.Label(search_box, text='⌕', bg=SURFACE, fg=FAINT, font=(FONT, 11)).pack(side='left', padx=(10, 2))
+        search = tk.Entry(search_box, textvariable=self.search, bg=SURFACE, fg=TEXT, insertbackground=ACCENT,
+                          relief='flat', font=(FONT, 10), highlightthickness=0)
+        search.pack(side='left', fill='x', expand=True, ipady=8, padx=(2, 8))
         self.search.trace_add('write', lambda *_: self.refresh_history())
-        tk.Label(self.sidebar, text='RECENT', bg=PANEL, fg='#77757c', font=(FONT, 8, 'bold')).pack(anchor='w', padx=10, pady=(26, 12))
-        self.history = tk.Listbox(self.sidebar, bg=PANEL, fg='#c6c3cb', selectbackground='#323035', selectforeground=TEXT,
-                                  borderwidth=0, highlightthickness=0, activestyle='none', font=(FONT, 10), exportselection=False)
-        self.history.pack(fill='both', expand=True)
+        tk.Label(self.sidebar, text='RECENT', bg=PANEL, fg=FAINT, font=(FONT, 8, 'bold')).pack(anchor='w', padx=8, pady=(22, 8))
+        self.history = tk.Listbox(self.sidebar, bg=PANEL, fg='#B8BEC8', selectbackground=RAISED, selectforeground=TEXT,
+                                  borderwidth=0, highlightthickness=0, activestyle='none', font=(FONT, 10),
+                                  exportselection=False)
+        self.history.pack(fill='both', expand=True, padx=2)
         self.history.bind('<<ListboxSelect>>', self.select)
-        tk.Frame(self.sidebar, bg='#2b292e', height=1).pack(fill='x', pady=18)
-        tk.Label(self.sidebar, text='●  On-device assistant', bg=PANEL, fg='#a8bea9', font=(FONT, 9), anchor='w').pack(fill='x', padx=8)
-        tk.Label(self.sidebar, text='Your space. Your pace.', bg=PANEL, fg='#79767f', font=(FONT, 9), anchor='w').pack(fill='x', padx=8, pady=(6, 0))
+        tk.Frame(self.sidebar, bg=BORDER, height=1).pack(fill='x', pady=(14, 14))
+        footer = tk.Frame(self.sidebar, bg=PANEL)
+        footer.pack(fill='x', padx=6)
+        self.connection_dot = tk.Label(footer, text='●', bg=PANEL, fg=OK, font=(FONT, 9))
+        self.connection_dot.pack(side='left')
+        self.connection = tk.Label(footer, text='Ready', bg=PANEL, fg='#B8BEC8', font=(FONT, 9), anchor='w')
+        self.connection.pack(side='left', padx=(6, 0))
+        tk.Label(self.sidebar, text='Anharmonic Labs', bg=PANEL, fg=FAINT, font=(FONT, 8), anchor='w').pack(
+            fill='x', padx=6, pady=(8, 0))
+
+        # ---- main column: top bar, conversation, composer
         main = tk.Frame(root, bg=BG)
         main.grid(row=0, column=1, sticky='nsew')
         main.columnconfigure(0, weight=1)
         main.rowconfigure(1, weight=1)
-        top = tk.Frame(main, bg=BG, padx=22, pady=16)
+        top = tk.Frame(main, bg=BG, padx=20, pady=14)
         top.grid(row=0, column=0, sticky='ew')
         ttk.Button(top, text='☰', style='Ghost.TButton', command=self.toggle_sidebar, width=3).pack(side='left')
-        tk.Label(top, text='Nessa', bg=BG, fg=TEXT, font=(FONT, 13, 'bold')).pack(side='left', padx=(10, 8))
-        tk.Label(top, text='LOCAL', bg=SURFACE, fg=MUTED, font=(FONT, 8), padx=8, pady=4).pack(side='left')
+        self.title_label = tk.Label(top, text='New conversation', bg=BG, fg=TEXT, font=(FONT, 12, 'bold'))
+        self.title_label.pack(side='left', padx=(10, 12))
+        chip(top, 'CLOUD + LOCAL' if self.cloud else 'ON-DEVICE', fg=SIGNAL if self.cloud else OK).pack(side='left')
+        if self.enterprise:
+            chip(top, 'EDITS IN PLACE', fg=WARN).pack(side='left', padx=(6, 0))
         ttk.Button(top, text='Changes', style='Ghost.TButton', command=lambda: self.show_details(1)).pack(side='right')
         ttk.Button(top, text='Activity', style='Ghost.TButton', command=lambda: self.show_details(0)).pack(side='right')
+        tk.Frame(main, bg=BORDER, height=1).grid(row=0, column=0, sticky='sew')
         viewport = tk.Frame(main, bg=BG)
         viewport.grid(row=1, column=0, sticky='nsew')
         self.content = tk.Frame(viewport, bg=BG)
         self.content.place(relx=.5, rely=0, anchor='n', relheight=1)
-        viewport.bind('<Configure>', lambda e: self.content.place_configure(width=min(820, max(1, e.width-56))))
+        viewport.bind('<Configure>', lambda e: self.content.place_configure(width=min(860, max(1, e.width-56))))
         self.content.columnconfigure(0, weight=1)
         self.content.rowconfigure(1, weight=1)
-        self.project = ttk.Label(self.content, text='', foreground=MUTED, wraplength=660, font=(FONT, 9))
-        self.project.grid(row=0, column=0, sticky='w', pady=(0, 8))
+        self.project = tk.Label(self.content, text='', bg=BG, fg=MUTED, font=(FONT, 9), anchor='w')
+        self.project.grid(row=0, column=0, sticky='ew', pady=(14, 0))
         self.conversation = tk.Frame(self.content, bg=BG)
         self.conversation.grid(row=1, column=0, sticky='nsew')
         self.chat = self.text_panel(self.conversation)
-        self.chat.configure(font=(FONT, 11), spacing1=4, spacing3=10, padx=12, pady=22)
-        self.chat.tag_configure('user', foreground=MUTED, font=(FONT, 9, 'bold'), spacing1=18, spacing3=8)
-        self.chat.tag_configure('assistant', foreground=ACCENT, font=(FONT, 10, 'bold'), spacing1=22, spacing3=8)
-        self.chat.tag_configure('user_body', background=SURFACE, lmargin1=16, lmargin2=16, rmargin=16, spacing1=10, spacing3=14)
-        self.chat.tag_configure('meta', foreground=MUTED, font=(FONT, 9))
-        self.chat.tag_configure('thinking', foreground=MUTED, font=(FONT, 9, 'italic'), lmargin1=12, lmargin2=12,
-                                spacing3=6)
+        self.chat.configure(font=(FONT, 11), spacing1=3, spacing2=3, spacing3=8, padx=8, pady=20)
+        self.chat.tag_configure('user', foreground=MUTED, font=(FONT, 9, 'bold'), spacing1=20, spacing3=8)
+        self.chat.tag_configure('assistant', foreground=TEXT, font=(FONT, 10, 'bold'), spacing1=22, spacing3=8)
+        self.chat.tag_configure('user_body', background=SURFACE, lmargin1=18, lmargin2=18, rmargin=18,
+                                spacing1=12, spacing3=14)
+        self.chat.tag_configure('meta', foreground=MUTED, font=(FONT, 9), lmargin1=18, lmargin2=30)
+        self.chat.tag_configure('status_meta', foreground=FAINT, font=(FONT, 8, 'bold'), spacing3=6)
+        self.chat.tag_configure('working', foreground=SIGNAL, font=(FONT, 9, 'bold'), spacing1=22, spacing3=6)
+        self.chat.tag_configure('thinking', foreground='#AEB4FF', font=(FONT, 10, 'italic'), lmargin1=18, lmargin2=18,
+                                rmargin=18, spacing1=4, spacing3=8)
         self.chat.tag_configure('bold', font=(FONT, 11, 'bold'))
-        self.chat.tag_configure('heading', font=(FONT, 14, 'bold'), spacing1=14, spacing3=10)
-        self.chat.tag_configure('code', background=PANEL, foreground='#d3cbe1', font=('DejaVu Sans Mono', 10), lmargin1=16, lmargin2=16, spacing1=4, spacing3=4)
+        self.chat.tag_configure('heading', font=(DISPLAY, 15, 'bold'), spacing1=14, spacing3=8)
+        self.chat.tag_configure('code', background='#0A0C10', foreground='#C9D1FF', font=(MONO, 10),
+                                lmargin1=18, lmargin2=18, rmargin=18, spacing1=2, spacing3=2)
+
+        # ---- empty state
         self.hero = tk.Frame(self.content, bg=BG)
         self.hero.grid(row=1, column=0, sticky='nsew')
         intro = tk.Frame(self.hero, bg=BG)
-        intro.place(relx=.5, rely=.47, anchor='center', relwidth=1)
-        tk.Label(intro, text='✳', bg=BG, fg=ACCENT, font=(FONT, 42)).pack(pady=(0, 16))
-        tk.Label(intro, text='Where shall we start?', bg=BG, fg=TEXT, font=('DejaVu Serif', 27)).pack()
-        tk.Label(intro, text='A question, an idea, a fresh perspective.', bg=BG, fg=MUTED, font=(FONT, 11)).pack(pady=(14, 28))
+        intro.place(relx=.5, rely=.45, anchor='center', relwidth=1)
+        if self.glyph_hero:
+            tk.Label(intro, image=self.glyph_hero, bg=BG).pack(pady=(0, 18))
+        tk.Label(intro, text='What are we building today?', bg=BG, fg=TEXT, font=(DISPLAY, 28, 'bold')).pack()
+        sub = ('Cloud reasoning when it is available, your own machine when it is not.' if self.cloud
+               else 'Private by design: everything runs on this machine.')
+        tk.Label(intro, text=sub, bg=BG, fg=MUTED, font=(FONT, 11)).pack(pady=(12, 30))
         suggestions = tk.Frame(intro, bg=BG)
         suggestions.pack()
-        for title, prompt in [('Explore an idea', 'Help me think through an idea: '), ('Make a plan', 'Help me make a plan for '), ('Explain something', 'Explain this to me: ')]:
-            ttk.Button(suggestions, text=title, command=lambda p=prompt: self.suggest(p)).pack(side='left', padx=4)
-        self.approval = ttk.Frame(self.content, padding=(0, 10))
-        self.approval.columnconfigure(0, weight=1)
-        self.plan_label = ttk.Label(self.approval, wraplength=620)
-        self.plan_label.grid(row=0, column=0, columnspan=2, sticky='w', pady=(0, 8))
-        ttk.Button(self.approval, text='Approve plan', style='Accent.TButton', command=lambda: self.decide(True)).grid(row=1, column=0, sticky='w')
-        ttk.Button(self.approval, text='Reject', command=lambda: self.decide(False)).grid(row=1, column=1, sticky='e')
-        self.status = ttk.Label(self.content, text='', foreground=MUTED, font=(FONT, 9))
-        self.status.grid(row=4, column=0, sticky='w', padx=10, pady=(6, 8))
-        compose = RoundedSurface(self.content, height=144)
+        for title, prompt in [('◇  Build a small app', 'Build a small app that '),
+                              ('◇  Fix a bug', 'Find and fix the bug where '),
+                              ('◇  Explain something', 'Explain this to me: ')]:
+            ttk.Button(suggestions, text=title, style='Suggest.TButton',
+                       command=lambda p=prompt: self.suggest(p)).pack(side='left', padx=5)
+
+        # ---- approvals and permissions
+        self.approval_card = RoundedSurface(self.content, color=SURFACE, outline=ACCENT, height=150)
+        self.approval = self.approval_card  # grid/grid_remove target used by the controller
+        body = self.approval_card.body
+        body.columnconfigure(0, weight=1)
+        self.approval_title = tk.Label(body, text='', bg=SURFACE, fg=ACCENT, font=(FONT, 8, 'bold'), anchor='w')
+        self.approval_title.grid(row=0, column=0, columnspan=3, sticky='ew', pady=(2, 4))
+        self.plan_label = tk.Label(body, text='', bg=SURFACE, fg=TEXT, font=(FONT, 10), justify='left',
+                                   anchor='w', wraplength=700)
+        self.plan_label.grid(row=1, column=0, columnspan=3, sticky='ew')
+        buttons = tk.Frame(body, bg=SURFACE)
+        buttons.grid(row=2, column=0, columnspan=3, sticky='e', pady=(10, 0))
+        ttk.Button(buttons, text='Not now', command=lambda: self.decide(False)).pack(side='right')
+        self.approve_button = ttk.Button(buttons, text='Approve', style='Accent.TButton',
+                                         command=lambda: self.decide(True))
+        self.approve_button.pack(side='right', padx=8)
+        self.status = tk.Label(self.content, text='', bg=BG, fg=MUTED, font=(FONT, 9), anchor='w')
+        self.status.grid(row=4, column=0, sticky='ew', padx=10, pady=(6, 8))
+
+        # ---- composer
+        self.compose = compose = RoundedSurface(self.content, height=132)
         compose.grid(row=5, column=0, sticky='ew')
         compose.body.columnconfigure(0, weight=1)
         compose.body.rowconfigure(0, weight=1)
         self.input = tk.Text(compose.body, height=2, bg=SURFACE, fg=TEXT, insertbackground=ACCENT, wrap='word',
                              font=(FONT, 11), relief='flat', padx=6, pady=6, highlightthickness=0, undo=True)
         self.input.grid(row=0, column=0, sticky='nsew')
-        self.placeholder = tk.Label(self.input, text='Message Nessa…', bg=SURFACE, fg=MUTED, font=(FONT, 11))
+        self.placeholder = tk.Label(self.input, text='Message Nessa…', bg=SURFACE, fg=FAINT, font=(FONT, 11))
         self.placeholder.place(x=6, y=6)
         self.placeholder.bind('<Button-1>', lambda _: self.input.focus_set())
         self.input.bind('<KeyRelease>', self.composer_changed)
         self.input.bind('<<Modified>>', self.composer_changed)
         self.input.bind('<Return>', self.enter)
+        self.input.bind('<FocusIn>', lambda _: compose.set_outline('#3B3570'))
+        self.input.bind('<FocusOut>', lambda _: compose.set_outline(BORDER))
         controls = tk.Frame(compose.body, bg=SURFACE)
         controls.grid(row=1, column=0, sticky='ew', pady=(6, 0))
-        self.model_label = tk.Label(controls, text='✳  Fast chat', bg=SURFACE, fg=MUTED, font=(FONT, 9))
-        self.model_label.pack(side='left', padx=8)
+        self.model_label = tk.Label(controls, text='●  Ready', bg=RAISED, fg=MUTED, font=(FONT, 8, 'bold'),
+                                    padx=9, pady=4)
+        self.model_label.pack(side='left', padx=4)
         self.send_button = ttk.Button(controls, text='↑', width=3, style='Accent.TButton', command=self.send)
         self.send_button.pack(side='right')
-        self.stop_button = ttk.Button(controls, text='Stop', command=self.stop, state='disabled')
+        self.stop_button = ttk.Button(controls, text='■  Stop', command=self.stop, state='disabled')
         self.stop_button.pack(side='right', padx=8)
         self.stop_button.pack_forget()
-        ttk.Label(self.content, text='Local by design   ·   Enter to send, Shift+Enter for a new line', foreground='#7f7c85', font=(FONT, 8), anchor='center').grid(row=6, column=0, sticky='ew', pady=(12, 18))
+        hint = 'Enter to send   ·   Shift+Enter for a new line'
+        if self.enterprise:
+            hint += '   ·   Nessa asks before every change'
+        tk.Label(self.content, text=hint, bg=BG, fg=FAINT, font=(FONT, 8), anchor='center').grid(
+            row=6, column=0, sticky='ew', pady=(10, 16))
+
+        # ---- workspace window
         self.details = tk.Toplevel(root)
         self.details.withdraw()
         self.details.title('Nessa · Workspace')
-        self.details.geometry('800x580')
+        self.details.geometry('860x600')
         self.details.configure(bg=BG)
+        if self.icons:
+            self.details.iconphoto(False, *self.icons)
         self.details.protocol('WM_DELETE_WINDOW', self.details.withdraw)
-        actions = ttk.Frame(self.details, padding=(18, 12, 18, 0))
+        actions = ttk.Frame(self.details, padding=(18, 14, 18, 0))
         actions.pack(fill='x')
         self.apply_button = ttk.Button(actions, text='Apply to project', style='Accent.TButton',
                                        command=self.apply_changes, state='disabled')
         self.apply_button.pack(side='right')
-        ttk.Label(actions, text='Changes stay in a private copy until you apply them.',
-                  foreground=MUTED, font=(FONT, 9)).pack(side='left')
+        self.details_note = ttk.Label(actions, text='Changes stay in a private copy until you apply them.',
+                                      foreground=MUTED, font=(FONT, 9))
+        self.details_note.pack(side='left')
         self.tabs = ttk.Notebook(self.details)
         self.tabs.pack(fill='both', expand=True, padx=18, pady=18)
         self.activity = self.text_tab(self.tabs, 'Activity')
@@ -201,13 +310,24 @@ class Window:
         self.tick()
 
     def text_panel(self, frame):
-        text = tk.Text(frame, bg=BG, fg=TEXT, insertbackground=TEXT, wrap='word', font=('DejaVu Sans Mono', 10),
+        text = tk.Text(frame, bg=BG, fg=TEXT, insertbackground=TEXT, wrap='word', font=(MONO, 10),
                        relief='flat', padx=16, pady=18, state='disabled', highlightthickness=0)
         scroll = ttk.Scrollbar(frame, command=text.yview)
         text.configure(yscrollcommand=scroll.set)
         scroll.pack(side='right', fill='y')
         text.pack(fill='both', expand=True)
         return text
+
+    def speaker(self, name, note=''):
+        """Assistant header line: the brand glyph, the name and an optional state."""
+        self.chat.insert('end', '\n', 'assistant')
+        if self.glyph_small:
+            self.chat.image_create('end', image=self.glyph_small, padx=2)
+            self.chat.insert('end', '  ', 'assistant')
+        self.chat.insert('end', name, 'assistant')
+        if note:
+            self.chat.insert('end', '  ·  ' + note, 'working')
+        self.chat.insert('end', '\n', 'assistant')
 
     def composer_changed(self, _=None):
         if self.input.get('1.0', 'end-1c'):
@@ -298,6 +418,7 @@ class Window:
         self.set_text(self.activity, '')
         self.set_text(self.patch, 'No file changes yet.')
         self.project.configure(text='')
+        self.title_label.configure(text='New conversation')
         self.status.configure(text='')
         self.approval.grid_remove()
         self.send_button.configure(state='normal')
@@ -319,7 +440,7 @@ class Window:
         self.new_button.configure(state='disabled')
         self.project_button.configure(state='disabled')
         self.send_button.configure(state='disabled')
-        self.status.configure(text='Preparing a private project copy…')
+        self.status.configure(text='Opening the project…' if self.enterprise else 'Preparing a private project copy…')
         def work():
             try:
                 self.creation.put((self.app.create(project)['id'], None))
@@ -388,7 +509,8 @@ class Window:
             pass
         if self.current:
             d = self.app.snapshot(self.current)
-            self.project.configure(text=('Project · '+Path(d['project']).name) if d['project'] else '')
+            self.project.configure(text=('▸  ' + Path(d['project']).name + ('   ·   editing in place' if self.enterprise else
+                                                                            '   ·   private copy')) if d['project'] else '')
             turn = current_turn(d['activity']) if d['busy'] else []
             fingerprint = json.dumps([self.current, d['messages'], d.get('partial'), len(turn)])
             if fingerprint != self.rendered:
@@ -401,24 +523,25 @@ class Window:
                 self.chat.configure(state='normal')
                 self.chat.delete('1.0', 'end')
                 for m in d['messages']:
-                    self.chat.insert('end', ('You' if m['role']=='user' else '✳  Nessa')+'\n', m['role'])
                     if m['role'] == 'user':
+                        self.chat.insert('end', 'YOU\n', 'user')
                         self.chat.insert('end', m['content']+'\n\n', 'user_body')
                     else:
+                        self.speaker('Nessa')
                         self.render_reply(m['content'])
                     if m.get('status') not in (None, 'answered'):
-                        self.chat.insert('end', m['status'].replace('_', ' ')+'\n\n', 'meta')
+                        self.chat.insert('end', m['status'].replace('_', ' ').upper()+'\n\n', 'status_meta')
                 if d['busy'] and not d.get('partial') and turn:
                     # What Nessa is doing right now: real events plus the model's own reasoning.
-                    self.chat.insert('end', '✳  Nessa · working\n', 'assistant')
+                    self.speaker('Nessa', 'working')
                     reasoning = narrate.latest_reasoning(turn)
                     if reasoning:
-                        self.chat.insert('end', 'Reasoning: ' + reasoning + '\n', 'thinking')
+                        self.chat.insert('end', reasoning + '\n', 'thinking')
                     for line in narrate.feed(turn):
                         self.chat.insert('end', line + '\n', 'meta')
                     self.chat.insert('end', '\n')
                 if d.get('partial'):
-                    self.chat.insert('end', '✳  Nessa\n', 'assistant')
+                    self.speaker('Nessa')
                     self.render_reply(d['partial'])
                 self.chat.configure(state='disabled')
                 self.chat.see('end')
@@ -445,9 +568,16 @@ class Window:
             if d['plan']:
                 plan = d['plan']
                 permission = str(plan.get('goal', '')).startswith('Allow ')
-                self.plan_label.configure(text=('PERMISSION\n' if permission else 'PLAN APPROVAL\n')+plan.get('goal', '')
-                                          +'\n'+'\n'.join(str(s) for s in plan.get('steps', [])))
-                self.approval.grid(row=3, column=0, sticky='ew')
+                color = WARN if permission else ACCENT
+                self.approval_title.configure(text='PERMISSION NEEDED' if permission else 'PLAN FOR YOUR APPROVAL', fg=color)
+                self.plan_label.configure(text=plan.get('goal', '') + '\n' + '\n'.join(
+                    ('    ' if permission else '  •  ') + str(s) for s in plan.get('steps', [])))
+                self.approve_button.configure(text='Allow' if permission else 'Approve plan',
+                                              style='Warn.TButton' if permission else 'Accent.TButton')
+                self.approval_card.set_outline(color)
+                lines = 2 + len(plan.get('steps', [])) + sum(len(str(s)) // 90 for s in plan.get('steps', []))
+                self.approval_card.configure(height=min(320, 96 + 20 * lines))
+                self.approval.grid(row=3, column=0, sticky='ew', pady=(6, 4))
                 status = 'Waiting for your permission' if permission else 'Waiting for your plan approval'
             else:
                 self.approval.grid_remove()
@@ -462,8 +592,21 @@ class Window:
             elif d['busy'] and d.get('partial'):
                 status = 'Nessa is replying…'
             active = d.get('active_model', '')
-            label = (active + ' · cloud') if '/' in active else ('Local ' + active if active else 'Local chat')
-            self.model_label.configure(text='✳  ' + label)
+            cloud_model = '/' in active
+            name = active.split('/')[-1].split(':')[0] if active else ''
+            self.model_label.configure(text=('●  ' + name + (' · cloud' if cloud_model else ' · on-device')) if name
+                                       else '●  Ready', fg=SIGNAL if cloud_model else (OK if name else MUTED))
+            switched = next((e for e in reversed(d['activity']) if e['event'] == 'model_switched'), None)
+            if switched and not cloud_model and self.cloud:
+                self.connection_dot.configure(fg=WARN)
+                self.connection.configure(text='Cloud unavailable · on-device')
+            elif name:
+                self.connection_dot.configure(fg=SIGNAL if cloud_model else OK)
+                self.connection.configure(text=('Cloud · ' if cloud_model else 'On-device · ') + name)
+            self.title_label.configure(text=d.get('title') or 'New conversation')
+            direct = bool(d.get('project')) and self.enterprise
+            self.details_note.configure(text='Nessa edits this project directly; the snapshot keeps every change '
+                                        'reviewable.' if direct else 'Changes stay in a private copy until you apply them.')
             if not self.creating:
                 self.status.configure(text=status)
         self.root.after(400, self.tick)
@@ -511,7 +654,7 @@ def main():
                    help='project chats edit the project in place with per-action permission prompts')
     p.add_argument('--sessions', type=Path, default=Path.home() / '.agentharness/desktop-chats')
     args = p.parse_args()
-    root = tk.Tk()
+    root = tk.Tk(className='Nessa')  # matches StartupWMClass in nessa.desktop
     args.sessions.mkdir(parents=True, exist_ok=True)
     lock = (args.sessions / '.gui.lock').open('w')
     try:

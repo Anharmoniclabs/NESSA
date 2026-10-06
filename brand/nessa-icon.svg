@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- NESSA app icon: the mark on an ink tile with faint cymatic rings. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1A1E27"/>
+      <stop offset="1" stop-color="#0D0F14"/>
+    </linearGradient>
+    <linearGradient id="resonance" x1="0.1" y1="1" x2="0.9" y2="0">
+      <stop offset="0" stop-color="#8B7CFF"/>
+      <stop offset="1" stop-color="#4FD8C4"/>
+    </linearGradient>
+    <clipPath id="clip"><rect width="512" height="512" rx="116"/></clipPath>
+  </defs>
+  <rect width="512" height="512" rx="116" fill="url(#tile)"/>
+  <g clip-path="url(#clip)" fill="none" stroke="#8B7CFF" stroke-opacity="0.10" stroke-width="3">
+    <circle cx="395" cy="135" r="90"/><circle cx="395" cy="135" r="160"/><circle cx="395" cy="135" r="240"/>
+    <circle cx="395" cy="135" r="330"/>
+  </g>
+  <rect x="1.5" y="1.5" width="509" height="509" rx="115" fill="none" stroke="#FFFFFF" stroke-opacity="0.06" stroke-width="3"/>
+  <g transform="translate(16 60) scale(0.8)">
+    <path d="M134 380 V176 C134 132 182 118 206 154 L300 312 C322 350 368 338 368 292 V180 C368 150 384 128 410 120"
+          fill="none" stroke="url(#resonance)" stroke-width="50" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="474" cy="94" r="24" fill="#4FD8C4"/>
+  </g>
+</svg>
