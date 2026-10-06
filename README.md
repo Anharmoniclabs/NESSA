@@ -33,6 +33,32 @@ python -m unittest discover -s kaggle/gemma4_submission -v
 python -m agentharness doctor
 ```
 
+## Enterprise-style mode
+
+Like Claude Code / Codex CLI: edit the project in place with per-action permissions, git,
+subagents and transcripts. The private-copy workflow above remains the default.
+
+```bash
+python -m agentharness chat ~/code/app --enterprise --profile lfm-32k          # asks before edits/commands
+python -m agentharness run ~/code/app "fix the flaky test" --enterprise \
+    --permission-mode accept-edits --finish-hooks tests                          # edits free, commands ask
+python -m agentharness transcript ~/.agentharness/runs/<run>                     # main + subagent messages
+```
+
+- `--permission-mode plan|default|accept-edits|bypass`; answer `a` to always allow a tool.
+- `--completion model` (preset) lets the model decide when it is done; `--finish-hooks` can block it.
+- The `agent` tool delegates to `explore`, `plan`, `general` or custom `.nessa/agents/*.md` subagents,
+  each with its own context; `--subagent-model` or a definition's `model:` runs small local specialists.
+- `--profile lfm-32k` uses `nessa-lfm-32k` (32K tokens; build from `configs/Modelfile.lfm-32k`).
+
+### Cloud models (opt-in)
+
+`--cloud` uses Hugging Face Inference Providers first (default `zai-org/GLM-5.3`, then
+`moonshotai/Kimi-K3`, `deepseek-ai/DeepSeek-V4-Pro-0813`) and falls back to the local model when
+they are unavailable or credits run out. The token comes from `HF_TOKEN` or `~/Desktop/HF`.
+**This sends prompts and project content to Hugging Face and its providers.**
+`python -m agentharness doctor --cloud` shows which cloud models currently answer.
+
 ## Message-driven local agent
 
 NESSA now supports terminal chat, durable follow-ups/resume, operation receipts,

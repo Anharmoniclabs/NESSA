@@ -37,10 +37,26 @@ DEFAULT_URL = os.environ.get("AGENT_BASE_URL", "http://127.0.0.1:11434/v1")  # O
 DEFAULT_MODEL = os.environ.get("AGENT_MODEL")
 
 
-def _client(a) -> ChatClient:
+def _local_client(a) -> ChatClient:
     return ChatClient(a.base_url, a.model, max_tokens=a.max_tokens, allow_remote=a.allow_remote,
                       temperature=a.temperature if a.temperature is not None else 0.0,
                       reasoning_effort=a.reasoning_effort)
+
+
+def _client(a):
+    """The local model, or (with --cloud) Hugging Face models falling back to the local model."""
+    local = _local_client(a)
+    if not getattr(a, "cloud", False):
+        return local
+    from . import cloud
+    models = tuple(m for m in (a.cloud_models or "").split(",") if m) or cloud.DEFAULT_MODELS
+    token = cloud.load_token(a.hf_token_file)
+    def switch(old, new, errors):
+        print(f"[model] {old} unavailable -> using {new}", flush=True)
+        for error in errors:
+            print(f"        {error[:160]}", flush=True)
+    return cloud.FallbackClient(cloud.cloud_clients(token, models, max_tokens=max(a.max_tokens or 0, 4096))
+                                + [local], on_switch=switch)
 
 
 def _config(a, **over) -> AgentConfig:
@@ -124,7 +140,7 @@ def print_event(event, data):
         else:
             print(f"[check] {data.get('name')}: {data.get('status')}", flush=True)
     elif event == 'model_started':
-        print('[model] Waiting for local model… (Ctrl+C to cancel)', flush=True)
+        print(f"[model] Waiting for {data.get('model') or 'model'}… (Ctrl+C to cancel)", flush=True)
     elif event == 'model':
         print(f"[model] Reply received in {data['seconds']:.1f}s", flush=True)
     elif event == 'subagent_started':
@@ -371,8 +387,21 @@ def cmd_lesson(a) -> int:
 
 def cmd_doctor(a) -> int:
     ok = True
+    if a.cloud:
+        from . import cloud
+        try:
+            token = cloud.load_token(a.hf_token_file)
+            models = tuple(m for m in (a.cloud_models or "").split(",") if m) or cloud.DEFAULT_MODELS
+            for client in cloud.cloud_clients(token, models, max_tokens=8):
+                try:
+                    client.chat([{"role": "user", "content": "ping"}])
+                    print(f"cloud {client.model}: available")
+                except ModelError as exc:
+                    print(f"cloud {client.model}: UNAVAILABLE ({str(exc)[:160]})")
+        except ValueError as exc:
+            print(f"cloud: {exc}")
     try:
-        models = _client(a).models()
+        models = _local_client(a).models()
         print(f"model server {a.base_url}: reachable; models: {', '.join(models) or '(none)'}")
         if a.model not in models:
             ok = False
@@ -404,6 +433,12 @@ def main(argv=None) -> int:
         sp.add_argument("--reasoning-effort", choices=("none", "low", "medium", "high"), default=None)
         sp.add_argument("--max-tokens", type=int, default=None)
         sp.add_argument("--allow-remote", action="store_true", help="permit a non-local model server")
+        sp.add_argument("--cloud", action="store_true",
+                        help="use Hugging Face cloud models first, falling back to the local model. "
+                             "Sends prompts and project content to Hugging Face providers.")
+        sp.add_argument("--cloud-models", default=os.environ.get("AGENT_CLOUD_MODELS", ""),
+                        help="comma-separated HF model ids in preference order")
+        sp.add_argument("--hf-token-file", default=None, help="token file (default: HF_TOKEN or ~/Desktop/HF)")
 
     def agent_args(sp):
         model_args(sp)

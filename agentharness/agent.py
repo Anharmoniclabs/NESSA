@@ -369,8 +369,10 @@ class Agent:
         client = self.subagent_client or self.client
         if definition.model and definition.model != getattr(client, "model", ""):
             from .llm import ChatClient
-            client = ChatClient(getattr(client, "base_url", ""), definition.model,
-                                max_tokens=getattr(client, "max_tokens", 2048))
+            # A named specialist runs on the local server even when the parent is using the cloud.
+            local = (getattr(client, "clients", None) or [client])[-1]
+            client = ChatClient(getattr(local, "base_url", ""), definition.model,
+                                max_tokens=getattr(local, "max_tokens", 2048))
         read_only = self.phase in ("plan", "chat") or (self.permissions is not None
                                                        and self.permissions.mode == "plan")
         run_id = f"sub-{self.subagent_runs:02d}-{definition.name}"

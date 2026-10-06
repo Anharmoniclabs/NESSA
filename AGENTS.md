@@ -3,13 +3,18 @@
 ## Purpose
 
 This repository builds a local autonomous coding-agent harness. Keep one parent agent loop.
-Skills are focused micro-harness recipes inside that loop; do not introduce nested autonomous
-agents unless a task explicitly requires a measured multi-agent experiment.
+Skills are focused micro-harness recipes inside that loop. Subagents (the `agent` tool) are
+one level deep only; do not introduce other nested autonomous agents.
 
 ## Development rules
 
-- Preserve the private-workspace -> patch workflow.
-- The model proposes; deterministic harness code owns verification and completion.
+- Preserve the private-workspace -> patch workflow as the default.
+- The model proposes; deterministic harness code owns verification and completion by default.
+- Enterprise mode (`--enterprise`) is the opt-in exception: in-place edits behind per-action
+  permissions, model-decided completion with optional finish hooks, and subagents. Subagents never
+  nest, run through the parent's dispatcher (permissions, receipts, checkpoints) and are read-only
+  while planning.
+- Cloud models are opt-in only (`--cloud`) and must always fall back to a local model. Never log tokens.
 - Keep local model backends replaceable.
 - Prefer standard-library implementations in the core unless a dependency is clearly justified.
 - Every new tool must have a schema, kind, bounded output and tests.
