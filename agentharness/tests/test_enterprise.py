@@ -267,3 +267,16 @@ class Scaffolding(unittest.TestCase):
         result = self.agent([[("write_file", {"path": "main.py", "content": "print(1)\n"})],
                              [("finish", {"summary": "done"})]]).run("write a script")
         self.assertEqual(result.status, "completed")
+
+    def test_claimed_success_without_files_is_sent_back(self):
+        steps = [[("finish", {"summary": "Built the game. All requirements satisfied."})],
+                 [("write_file", {"path": "main.py", "content": "print(1)\n"})],
+                 [("finish", {"summary": "done"})]]
+        result = self.agent(steps).run("build a local spades card game")
+        self.assertEqual(result.status, "completed")
+        self.assertIn("no files have changed", json.dumps(self.client.seen[1][0]))
+
+    def test_repeated_false_claims_end_as_no_change_not_success(self):
+        result = self.agent([[("finish", {"summary": "Built it."})]], finish_retries=1).run("build a game")
+        self.assertEqual(result.status, "no_change")
+        self.assertIn("none were made", result.summary)

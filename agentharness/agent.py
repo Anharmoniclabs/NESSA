@@ -1029,6 +1029,13 @@ class Agent:
     def _model_finish(self, summary: str) -> tuple[str | None, str]:
         """The model decides completion; only configured finish hooks can send it back to work."""
         changed = self.ws.changed_files()
+        if not changed and efficient.is_work_request(self.task):
+            # A build/fix request that changed nothing is not done, whatever the summary claims.
+            if self.finish_attempts < self.config.finish_retries:
+                self.finish_attempts += 1
+                return None, ("Not accepted: no files have changed, so nothing was built yet. Create the files "
+                              "with write_file (one per call), then run the checks and call finish.")
+            return "no_change", "Stopped: the request needed file changes but none were made."
         self._refresh_checks()
         # A hook whose check does not exist (e.g. tests in a project without tests) cannot run;
         # it is reported, not treated as passing or failing.
@@ -1094,7 +1101,9 @@ class Agent:
                     if call.name == 'finish':
                         status, message = self._finish_gate(args['summary'])
                         if status:
-                            terminal = (status, args['summary'])
+                            # When the harness overrules the model, show its verdict, not the model's claim.
+                            overruled = status == 'no_change' and message.startswith('Stopped:')
+                            terminal = (status, message if overruled else args['summary'])
                     elif call.name == 'respond':
                         if self.ws.changed_files():
                             message = 'ERROR: files changed; use finish so verification runs'
