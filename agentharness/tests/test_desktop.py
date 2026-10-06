@@ -217,3 +217,33 @@ class ApplyChangesTests(unittest.TestCase):
             time.sleep(.01)
         self.assertIn('Applied to', self.app.snapshot(self.key)['messages'][-1]['content'])
         self.assertEqual((self.project / 'calc.py').read_text(), 'value = 2\n')
+
+
+class DesktopEnterpriseTests(unittest.TestCase):
+    wait = DesktopTests.wait
+
+    def setUp(self):
+        DesktopTests.setUp(self)
+        self.app = App(self.root / 'enterprise', 'http://127.0.0.1:11435/v1', 'nessa-lfm:latest',
+                       profile='lfm-32k', enterprise=True)
+        self.key = self.app.create(str(self.project))['id']
+
+    def test_project_chat_edits_in_place_and_apply_is_refused(self):
+        chat = self.app.chats[self.key]
+        self.assertTrue((chat.directory / 'DIRECT').exists())
+        self.assertFalse((chat.directory / 'repo').exists())
+        chat.data['result'] = dict(status='completed')
+        with self.assertRaisesRegex(ValueError, 'already in the project'):
+            self.app.apply(self.key)
+
+    def test_permission_prompt_uses_approval_panel(self):
+        import threading
+        chat = self.app.chats[self.key]
+        answers = []
+        worker = threading.Thread(target=lambda: answers.append(chat.permit('run_command', {'command': 'ls'})))
+        worker.start()
+        self.wait(lambda: self.app.snapshot(self.key)['plan'] is not None)
+        self.assertEqual(self.app.snapshot(self.key)['plan']['goal'], 'Allow run_command?')
+        self.app.decide(self.key, True)
+        worker.join(3)
+        self.assertEqual(answers, [(True, '', False)])

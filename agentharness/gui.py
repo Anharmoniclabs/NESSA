@@ -470,6 +470,11 @@ def main():
     p.add_argument('--chat-base-url', default='http://127.0.0.1:11435/v1')
     p.add_argument('--review-model', help='optional advisory reviewer; disabled by default')
     p.add_argument('--review-base-url', help='reviewer endpoint; defaults to the project model endpoint')
+    p.add_argument('--profile', default='lfm-i3-12gb', help='local model budget profile, e.g. lfm-32k')
+    p.add_argument('--cloud', action='store_true',
+                   help='use Hugging Face cloud models first, local fallback; sends content to HF providers')
+    p.add_argument('--enterprise', action='store_true',
+                   help='project chats edit the project in place with per-action permission prompts')
     p.add_argument('--sessions', type=Path, default=Path.home() / '.agentharness/desktop-chats')
     args = p.parse_args()
     root = tk.Tk()
@@ -482,7 +487,8 @@ def main():
         root.destroy()
         return
     Window(root, App(args.sessions, args.base_url, args.model, args.chat_model, args.chat_base_url,
-                     args.review_model, args.review_base_url), args.project)
+                     args.review_model, args.review_base_url, args.profile, args.cloud,
+                     args.enterprise), args.project)
     root.mainloop()
 
 

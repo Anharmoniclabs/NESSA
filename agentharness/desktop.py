@@ -86,11 +86,26 @@ class Chat:
             self.save()
         return self.answer
 
+    def permit(self, name, args):
+        """Per-action permission in direct mode, shown in the same approval panel as plans."""
+        detail = [f'{key}: {str(value)[:400]}' for key, value in args.items()]
+        allowed, feedback = self.approve(dict(goal=f'Allow {name}?', steps=detail, files=[], checks=[]))
+        return allowed, feedback, False
+
 
 class App:
     def __init__(self, root, base_url, model, chat_model='nessa-lfm:latest',
-                 chat_base_url='http://127.0.0.1:11435/v1', review_model=None, review_base_url=None):
+                 chat_base_url='http://127.0.0.1:11435/v1', review_model=None, review_base_url=None,
+                 profile='lfm-i3-12gb', cloud=False, enterprise=False):
         self.root, self.base_url, self.model = Path(root), base_url, model
+        self.profile, self.cloud, self.enterprise = profile, cloud, enterprise
+        self.recorder = None
+        self.cloud_token = None
+        if cloud:
+            from . import cloud as cloud_models
+            from .distill import Recorder
+            self.cloud_token = cloud_models.load_token()
+            self.recorder = Recorder()
         self.chat_model = chat_model
         self.chat_base_url = chat_base_url
         self.review_model, self.review_base_url = review_model, review_base_url
@@ -122,7 +137,7 @@ class App:
         key = uuid.uuid4().hex
         directory = self.root / key
         if project:
-            Workspace.create(project, directory)
+            (Workspace.direct if self.enterprise else Workspace.create)(project, directory)
         else:
             # Plain conversations get an empty private workspace, never the cwd.
             (directory / 'repo').mkdir(parents=True)
@@ -223,29 +238,47 @@ class App:
                         chat.data['messages'].append(dict(role='assistant', content=answer, status='answered'))
                         chat.data['result'] = RunResult('answered', answer, '', 0, [], None).to_dict()
                     return
-            profile = PROFILES['lfm-i3-12gb']
+            profile = PROFILES[self.profile]
             client = ChatClient(self.base_url, self.model, max_tokens=profile['max_tokens'],
                                 temperature=profile['temperature'], reasoning_effort=profile['reasoning_effort'])
+            stream = None if is_news_query(message) else chat.delta
             fast = ChatClient(self.chat_base_url, self.chat_model, max_tokens=640,
                               temperature=0.2, timeout=180, retries=1, reasoning_effort='none',
-                              on_delta=None if is_news_query(message) else chat.delta)
+                              on_delta=stream)
+            if self.cloud:
+                from . import cloud as cloud_models
+                switch = lambda old, new, errors: chat.event('model_switched', dict(previous=old, model=new,
+                                                                                  errors=errors))
+                client = cloud_models.FallbackClient(
+                    cloud_models.cloud_clients(self.cloud_token, max_tokens=4096) + [client],
+                    on_switch=switch, recorder=self.recorder)
+                fast = cloud_models.FallbackClient(
+                    cloud_models.cloud_clients(self.cloud_token, max_tokens=1536) + [fast],
+                    on_switch=switch, recorder=self.recorder)
+                fast.on_delta = stream
             work_directory = Path(chat.data.get('work_directory', chat.directory))
-            if not (work_directory / 'repo').exists():
-                Workspace.create(Path(chat.data['project']), work_directory)
-            ws = Workspace(work_directory)
+            if not (work_directory / 'repo').exists() and not (work_directory / 'DIRECT').exists():
+                (Workspace.direct if self.enterprise else Workspace.create)(Path(chat.data['project']), work_directory)
+            ws = Workspace.open(work_directory)
+            checks = CheckRunner(detect_checks(ws.repo))
+            enterprise = {}
+            if ws.direct:
+                enterprise = dict(permission_mode='default', completion='model', plan_first=False,
+                                  finish_hooks=('tests',) if 'tests' in checks.checks else ())
             cfg = AgentConfig(conversational=True, efficient_chat=True, require_approval=True,
                               studio_context=chat.data.get('studio_last_result', ''),
                               tool_mode='text' if profile['text_tools'] else 'native',
                               local_roots=tuple(str(Path.home()/name) for name in ('Projects', 'Documents', 'Downloads', 'Desktop', 'Pictures')),
                               max_context_chars=profile['max_context_chars'],
-                              tool_output_chars=profile['tool_output_chars'], compact_at_tokens=6144,
-                              keep_dev_processes=True)
+                              tool_output_chars=profile['tool_output_chars'],
+                              compact_at_tokens=profile.get('compact_at_tokens', 6144),
+                              keep_dev_processes=True, archive_logs=True, **enterprise)
             resume = (work_directory / 'evidence/session.json').exists()
             task = chat.data['messages'][0]['content'] if resume else message
             lessons = LessonStore().relevant(chat.data['project'] or '*', message)
             reviewer = Reviewer(ChatClient(self.review_base_url or self.base_url, self.review_model,
                                 max_tokens=512)) if self.review_model else None
-            result = Agent(client, ws, config=cfg, checks=CheckRunner(detect_checks(ws.repo)),
+            result = Agent(client, ws, config=cfg, checks=checks, asker=chat.permit,
                            approver=chat.approve, on_event=chat.event, chat_client=fast,
                            lessons=lessons, reviewer=reviewer, conversation_context=context).run(
                                task, resume=resume, message=message if resume else '')
@@ -278,9 +311,11 @@ class App:
             if not chat.data.get('project'):
                 raise ValueError('This conversation has no attached project.')
             status = (chat.data.get('result') or {}).get('status')
+            if (Path(chat.data.get('work_directory', chat.directory)) / 'DIRECT').exists():
+                raise ValueError('Changes are already in the project: this conversation edits it directly.')
             if status not in APPLYABLE:
                 raise ValueError(f'Only verified or unverified results can be applied (latest: {status or "none"}).')
-            ws = Workspace(Path(chat.data.get('work_directory', chat.directory)))
+            ws = Workspace.open(Path(chat.data.get('work_directory', chat.directory)))
             try:
                 changed = ws.apply_to(Path(chat.data['project']))
             except ToolError as exc:
@@ -301,7 +336,7 @@ class App:
             evidence = Path(chat.data.get('work_directory', chat.directory)) / 'evidence'
             if (evidence / 'dev' / 'processes.json').exists():
                 try:
-                    DevProcessManager(Workspace(evidence.parent), evidence).stop_all()
+                    DevProcessManager(Workspace.open(evidence.parent), evidence).stop_all()
                 except Exception:
                     pass
 

@@ -783,7 +783,8 @@ class Agent:
                                           'answer informational questions or propose changes for approval.'))
             self._deliver(reply, results)
             if request is not None:
-                self.phase = 'plan'
+                # With per-action permissions there is no separate plan gate unless asked for.
+                self.phase = 'plan' if self.config.plan_first or self.permissions is None else 'execute'
                 # The model selects the workflow; the user's exact request owns scope.
                 self.log('work_requested', request=self.task, model_summary=request)
                 self._say(self._intro(self.task))
