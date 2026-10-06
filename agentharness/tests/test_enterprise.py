@@ -218,3 +218,17 @@ class PrivateWorkflowUnchanged(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChatRouting(Base):
+    def test_clear_build_request_skips_the_chat_decision_turn(self):
+        agent = self.agent([[("finish", {"summary": "nothing to do"})]], conversational=True, efficient_chat=True)
+        agent.run("write a game in python for spades and launch to test")
+        first_tools = self.client.seen[0][1]
+        self.assertIn("write_file", first_tools)  # the first model call is already in the work phase
+        self.assertNotIn("start_work", first_tools)
+
+    def test_ordinary_chat_still_goes_to_the_model(self):
+        agent = self.agent(["Here is a short poem."], conversational=True, efficient_chat=True)
+        result = agent.run("write me a poem")
+        self.assertEqual(result.status, "answered")

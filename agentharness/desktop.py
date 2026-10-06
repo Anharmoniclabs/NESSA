@@ -245,7 +245,7 @@ class App:
             client = ChatClient(self.base_url, self.model, max_tokens=profile['max_tokens'],
                                 temperature=profile['temperature'], reasoning_effort=profile['reasoning_effort'])
             stream = None if is_news_query(message) else chat.delta
-            fast = ChatClient(self.chat_base_url, self.chat_model, max_tokens=640,
+            fast = ChatClient(self.chat_base_url, self.chat_model, max_tokens=1536,  # LFM thinks before replying
                               temperature=0.2, timeout=180, retries=1, reasoning_effort='none',
                               on_delta=stream)
             if self.cloud:

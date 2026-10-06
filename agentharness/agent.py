@@ -721,6 +721,12 @@ class Agent:
         if self.config.efficient_chat:
             previous = self.user_messages[-2] if len(self.user_messages) > 1 else ''
             offered = efficient.chat_tools(self.task, offered, previous)
+            if offered == ['start_work'] and efficient.is_work_request(self.task):
+                # Small local models can spend their whole chat reply deciding to call start_work.
+                self.phase = 'plan' if self.config.plan_first or self.permissions is None else 'execute'
+                self.log('work_requested', request=self.task, model_summary='routed by harness')
+                self._say(self._intro(self.task))
+                return None, ''
         sources = {}
         fetched_sources = {}
         command_changed_files = False
