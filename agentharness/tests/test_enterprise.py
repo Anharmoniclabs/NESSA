@@ -295,3 +295,49 @@ class BareToolArguments(Base):
         self.assertIsNone(agent._bare_call('{"bogus": 1}', ["run_command"]))
         call = agent._bare_call('{"command": "ls"}', ["run_command", "read_file"])
         self.assertEqual((call.name, call.arguments), ("run_command", {"command": "ls"}))
+
+
+class ComputerAccess(Base):
+    def setUp(self):
+        super().setUp()
+        self.home = self.tmp / "home"
+        (self.home / "Projects" / "cards" / "spades").mkdir(parents=True)
+        (self.home / "Projects" / "cards" / "spades" / "game.py").write_text(
+            "import pathlib\npathlib.Path('ran.txt').write_text('yes')\n")
+        (self.home / "Projects" / ".secret").mkdir()
+        (self.home / "Projects" / ".secret" / "spades_key.txt").write_text("x")
+
+    def test_find_by_name_skips_hidden_folders(self):
+        agent = self.agent(["x"], local_roots=(str(self.home / "Projects"),))
+        out = agent.tools["local_find"].handler(agent, {"name": "spades"})
+        self.assertIn("cards/spades/", out)
+        self.assertNotIn(".secret", out)
+        self.assertIn("No files", agent.tools["local_find"].handler(agent, {"name": "*.zzz"}))
+
+    def test_launch_needs_permission_and_runs_detached(self):
+        import sys, time
+        asker = Recorder((True, "", False))
+        agent = self.agent(["x"], asker=asker, permission_mode="default", local_roots=(str(self.home),))
+        game = self.home / "Projects" / "cards" / "spades"
+        call = __import__("agentharness.llm", fromlist=["ToolCall"]).ToolCall(
+            "c1", "launch_program", {"argv": [sys.executable, "game.py"], "cwd": str(game)})
+        out = agent._execute(call, ["launch_program"])
+        self.assertEqual(asker.asked, ["launch_program"])
+        self.assertIn("exited immediately with code 0", out)
+        self.assertEqual((game / "ran.txt").read_text(), "yes")
+
+    def test_launch_outside_the_allowed_folders_is_refused(self):
+        agent = self.agent(["x"], local_roots=(str(self.home / "Projects"),))
+        with self.assertRaisesRegex(Exception, "outside"):
+            agent.tools["launch_program"].handler(agent, {"argv": ["ls"], "cwd": "/etc"})
+
+    def test_chat_can_find_then_launch_with_approval(self):
+        asker = Recorder((True, "", False))
+        steps = [[("local_find", {"name": "spades"})],
+                 [("launch_program", {"argv": ["true"], "cwd": str(self.home / "Projects/cards/spades")})],
+                 "Your spades game is running."]
+        agent = self.agent(steps, asker=asker, permission_mode="default", conversational=True,
+                           efficient_chat=True, local_roots=(str(self.home),))
+        result = agent.run("find my spades game and run it")
+        self.assertEqual(result.status, "answered")
+        self.assertEqual(asker.asked, ["launch_program"])  # finding is free; launching asks

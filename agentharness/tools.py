@@ -110,6 +110,14 @@ def build_tools(allow_shell: bool = True, allow_extract: bool = True) -> dict[st
              {'paths': {'type':'array', 'items':S}, 'fields': {'type':'array', 'items':{'type':'object'}},
               'tables': {'type':'boolean'}}, ('paths',), 'read',
              handler=lambda c,a: _local_extract(c,a), cacheable=False),
+        Tool('local_find', 'Find files or folders by name on the user\'s computer (Projects, Documents, Downloads, '
+             'Desktop, Pictures). `name` is a glob such as *spades* or *.py; `path` narrows the search.',
+             {'name': S, 'path': S}, ('name',), 'read', handler=lambda c, a: _local_find(c, a), cacheable=False),
+        Tool('launch_program', 'Start a program on the user\'s computer, e.g. argv ["python3", "game.py"] with cwd '
+             'the folder that contains it. Runs in the background so windows open on the desktop. '
+             'Always requires the user\'s approval.',
+             {'argv': {'type': 'array', 'items': S}, 'cwd': S}, ('argv', 'cwd'), 'dev',
+             handler=lambda c, a: _launch_program(c, a), cacheable=False),
         Tool('runtime_info', 'Show current local date/time, available tool names, local read roots and installed OCR utilities.',
              {}, kind='read', handler=lambda c,a: _runtime_info(c), cacheable=False),
         Tool('weather', 'Get current weather and today forecast for a city. Use for weather questions; report source, time and units.',
@@ -303,6 +311,53 @@ def _local_path(ctx, path):
            for part in target.relative_to(root).parts):
         raise ToolError('Hidden local paths are not exposed by desktop discovery tools.')
     return target
+
+
+LOCAL_FIND_SKIP = {'node_modules', '__pycache__', '.git', 'venv', '.venv', 'site-packages', 'dist', 'build'}
+
+
+def _local_find(ctx, args):
+    import fnmatch
+    roots = [_local_path(ctx, args['path'])] if args.get('path') else \
+        [Path(p).expanduser().resolve() for p in ctx.config.local_roots]
+    pattern = args['name'] if any(ch in args['name'] for ch in '*?[') else f"*{args['name']}*"
+    hits, scanned = [], 0
+    for root in roots:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if not d.startswith('.') and d not in LOCAL_FIND_SKIP]
+            for name in dirnames + filenames:
+                scanned += 1
+                if fnmatch.fnmatch(name.lower(), pattern.lower()):
+                    full = Path(dirpath) / name
+                    hits.append(str(full) + ('/' if full.is_dir() else ''))
+                    if len(hits) >= 100:
+                        return '\n'.join(hits) + '\n... more matches; narrow the name or path'
+            if scanned > 200_000:
+                break
+    return '\n'.join(hits) or f'No files or folders matching {pattern!r} under {", ".join(map(str, roots))}.'
+
+
+def _launch_program(ctx, args):
+    import time as _time
+    cwd = _local_path(ctx, args['cwd']) if Path(args['cwd']).is_absolute() else ctx.ws.path(args['cwd'])
+    if not cwd.is_dir():
+        raise ToolError(f'Not a folder: {cwd}')
+    if not args['argv']:
+        raise ToolError('argv must name the program to run.')
+    log_dir = ctx.evidence_dir / 'launched'
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log = log_dir / f"{int(_time.time())}-{Path(args['argv'][0]).name}.log"
+    with log.open('wb') as out:
+        try:
+            proc = subprocess.Popen(args['argv'], cwd=cwd, stdout=out, stderr=subprocess.STDOUT,
+                                    stdin=subprocess.DEVNULL, start_new_session=True)
+        except OSError as exc:
+            raise ToolError(f'Could not start {args["argv"][0]}: {exc}')
+    _time.sleep(2)
+    output = log.read_text(errors='replace')[-3000:]
+    if proc.poll() is not None:
+        return f'exited immediately with code {proc.returncode}\n{output or "(no output)"}'
+    return f'running (pid {proc.pid}) in {cwd}; log {log}\n{output}'
 
 
 def _local_list(ctx, args):
