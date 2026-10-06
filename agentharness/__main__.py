@@ -82,6 +82,8 @@ def _config(a, **over) -> AgentConfig:
         over.setdefault("completion", a.completion)
     if getattr(a, "finish_hooks", None):
         over.setdefault("finish_hooks", names(a.finish_hooks))
+    if not getattr(a, "no_archive", False):
+        over.setdefault("archive_logs", True)
     if getattr(a, "no_subagents", False):
         over.setdefault("allow_subagents", False)
     compact = PROFILES[a.profile].get("compact_at_tokens",
@@ -456,6 +458,8 @@ def main(argv=None) -> int:
                         help="comma-separated HF model ids in preference order")
         sp.add_argument("--no-distill", action="store_true",
                         help="with --cloud: do not record cloud replies for local-model training")
+        sp.add_argument("--no-archive", action="store_true",
+                        help="do not archive run transcripts to ~/.agentharness/distill/sessions")
         sp.add_argument("--hf-token-file", default=None, help="token file (default: HF_TOKEN or ~/Desktop/HF)")
 
     def agent_args(sp):

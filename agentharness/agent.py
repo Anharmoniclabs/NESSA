@@ -189,6 +189,7 @@ class AgentConfig:
     finish_hooks: tuple = ()                # checks that must pass before finish in completion="model"
     allow_subagents: bool = True
     subagent_max_runs: int = 8              # delegated tasks per run
+    archive_logs: bool = False              # copy each run's scrubbed transcript to ~/.agentharness/distill
     explicit: tuple = ()                    # fields set by the caller; agentharness.toml cannot override
 
 
@@ -290,6 +291,7 @@ class Agent:
         self.subagent_client = subagent_client
         self.agent_definitions = subagents.load_definitions(ws.repo)
         self.subagent_runs = 0
+        self._subagent_models: list[dict] = []
         self.store = SessionStore(self.evidence_dir)
         self.plan = None
         self.phase = 'chat' if self.config.conversational else ('plan' if self.config.plan_first else 'execute')
@@ -380,6 +382,7 @@ class Agent:
                  model=getattr(client, "model", None), read_only=read_only, description=description,
                  prompt=clip(prompt, 2000))
         sub = subagents.SubagentRun(self, definition, client, prompt, run_id, read_only)
+        self._subagent_models.append(dict(run_id=run_id, model=getattr(client, "model", None)))
         started = time.monotonic()
         try:
             status, report = sub.run()
@@ -1232,6 +1235,14 @@ class Agent:
                 recorder.outcome(status)
             except OSError:
                 pass
+        if self.config.archive_logs:
+            try:
+                from .distill import archive_run
+                models = {"main": getattr(self.client, "model", None)}
+                models.update({e["run_id"]: e.get("model") for e in self._subagent_models})
+                archive_run(self.evidence_dir, status, models, self.task)
+            except Exception as exc:  # archiving must never change a run's outcome
+                self.log("archive_error", error=f"{type(exc).__name__}: {exc}")
         try:
             telemetry.export_run(self.evidence_dir, status, result.seconds, self.project_config.otlp_endpoint)
         except Exception as exc:  # observability must never change a run's outcome

@@ -82,3 +82,18 @@ class Capture(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Archive(unittest.TestCase):
+    def test_run_log_is_archived_scrubbed_and_labelled(self):
+        tmp = Path(tempfile.mkdtemp())
+        ev = tmp / "evidence"
+        ev.mkdir()
+        (ev / "transcript.jsonl").write_text(json.dumps({"role": "user", "content": "key hf_" + "y" * 30}) + "\n")
+        path = distill.archive_run(ev, "verified", {"main": "nessa-lfm:latest"}, "task", tmp / "store")
+        record = json.loads(path.read_text())
+        self.assertFalse(record["imitate"])  # a local model's run is not a teacher example
+        self.assertNotIn("hf_yyyy", path.read_text())
+        self.assertEqual(distill.stats(tmp / "store")["archived_sessions"], 1)
+        cloud_run = distill.archive_run(ev, "completed", {"main": "zai-org/GLM-5.3"}, "t", tmp / "store")
+        self.assertTrue(json.loads(cloud_run.read_text())["imitate"])

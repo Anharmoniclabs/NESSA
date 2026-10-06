@@ -13,11 +13,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import time
 from pathlib import Path
 
 DEFAULT_DIR = Path.home() / ".agentharness" / "distill"
+
+
+def store_dir() -> Path:
+    """AGENTHARNESS_DISTILL_DIR overrides the store (tests use a temporary one)."""
+    return Path(os.environ.get("AGENTHARNESS_DISTILL_DIR") or DEFAULT_DIR)
 GOOD = ("verified", "completed", "answered")  # no_change is too weak a signal to imitate
 SECRETS = [
     (re.compile(r"hf_[A-Za-z0-9]{20,}"), "hf_<redacted>"),
@@ -45,7 +51,7 @@ def scrub(value):
 
 class Recorder:
     def __init__(self, directory: Path | None = None):
-        self.directory = Path(directory or DEFAULT_DIR)
+        self.directory = Path(directory or store_dir())
         self.directory.mkdir(parents=True, exist_ok=True)
         self.run_id = f"adhoc-{int(time.time())}"
 
@@ -68,6 +74,32 @@ class Recorder:
         self._append("outcomes.jsonl", dict(t=time.time(), run=self.run_id, status=status))
 
 
+def archive_run(evidence_dir: Path, status: str, models: dict, task: str,
+                directory: Path | None = None) -> Path | None:
+    """Keep every run's full log for later training/evaluation, scrubbed of secrets.
+
+    Unlike turns.jsonl (cloud teacher replies only, used for imitation), the archive includes
+    local-model runs and failures: useful as negative examples, preference pairs or eval cases.
+    `models` maps 'main'/'sub-..' to the model that answered.
+    """
+    evidence_dir = Path(evidence_dir)
+    transcript = evidence_dir / "transcript.jsonl"
+    if not transcript.exists():
+        return None
+    target = Path(directory or store_dir()) / "sessions"
+    target.mkdir(parents=True, exist_ok=True)
+    name = f"{time.strftime('%Y%m%d-%H%M%S')}-{hashlib.sha256(str(evidence_dir).encode()).hexdigest()[:8]}.json"
+    rows = [json.loads(line) for line in transcript.read_text(encoding="utf-8").splitlines() if line.strip()]
+    result = evidence_dir / "result.json"
+    record = dict(task=task, status=status, models=models, evidence_dir=str(evidence_dir),
+                  imitate=status in GOOD and any("/" in str(m) for m in models.values()),
+                  result=json.loads(result.read_text()) if result.exists() else None,
+                  transcript=rows)
+    path = target / name
+    path.write_text(json.dumps(scrub(record), ensure_ascii=False, default=str), encoding="utf-8")
+    return path
+
+
 def _rows(path: Path):
     if path.exists():
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -76,7 +108,7 @@ def _rows(path: Path):
 
 
 def stats(directory: Path | None = None) -> dict:
-    directory = Path(directory or DEFAULT_DIR)
+    directory = Path(directory or store_dir())
     outcomes = {r["run"]: r["status"] for r in _rows(directory / "outcomes.jsonl")}
     teachers, statuses, turns = {}, {}, 0
     for row in _rows(directory / "turns.jsonl"):
@@ -84,13 +116,15 @@ def stats(directory: Path | None = None) -> dict:
         teachers[row["teacher"]] = teachers.get(row["teacher"], 0) + 1
         status = outcomes.get(row["run"], "unfinished")
         statuses[status] = statuses.get(status, 0) + 1
-    return dict(turns=turns, runs=len(outcomes), by_teacher=teachers, by_run_status=statuses)
+    sessions = len(list((directory / "sessions").glob("*.json"))) if (directory / "sessions").is_dir() else 0
+    return dict(turns=turns, runs=len(outcomes), by_teacher=teachers, by_run_status=statuses,
+                archived_sessions=sessions)
 
 
 def export(out: Path, directory: Path | None = None, good=GOOD, max_chars: int = 24000,
            include_unfinished: bool = False) -> int:
     """Write {"messages": [...], "tools": [...]} rows; returns how many were written."""
-    directory = Path(directory or DEFAULT_DIR)
+    directory = Path(directory or store_dir())
     outcomes = {r["run"]: r["status"] for r in _rows(directory / "outcomes.jsonl")}
     seen, written = set(), 0
     Path(out).parent.mkdir(parents=True, exist_ok=True)
