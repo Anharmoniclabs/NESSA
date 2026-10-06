@@ -524,6 +524,11 @@ class Agent:
             raise
         if reply.prompt_tokens > self.config.compact_at_tokens:
             self._compact(force=True)
+        if not reply.tool_calls:
+            bare = self._bare_call(reply.content, offered)
+            if bare is not None:
+                reply.tool_calls = [bare]
+                self.log('bare_call_inferred', name=bare.name)
         if reply.native:
             self.messages.append({"role": "assistant", "content": reply.content or "",
                                   "tool_calls": reply.raw_tool_calls})
@@ -538,6 +543,24 @@ class Agent:
                  native=reply.native, prompt_tokens=reply.prompt_tokens,
                  seconds=round(time.monotonic() - model_started, 3))
         return reply
+
+    def _bare_call(self, content: str, offered: list[str]) -> ToolCall | None:
+        """Small models sometimes print a tool's arguments as JSON without the tool name, e.g.
+        {"command": "ls -la"}. Treat it as a call when exactly one offered tool fits those keys."""
+        text = (content or '').strip()
+        if text.startswith('```'):
+            text = text.strip('`').removeprefix('json').strip()
+        if not (text.startswith('{') and text.endswith('}')):
+            return None
+        try:
+            args = json.loads(text)
+        except ValueError:
+            return None
+        if not isinstance(args, dict) or not args or 'name' in args:
+            return None
+        fits = [n for n in offered if n in self.tools and set(args) <= set(self.tools[n].params)
+                and set(self.tools[n].required) <= set(args) and self.tools[n].required]
+        return ToolCall(f'bare_{self.steps}', fits[0], args, text) if len(fits) == 1 else None
 
     def _deliver(self, reply: Reply, results: list[tuple[ToolCall, str]]):
         limit = self.config.tool_output_chars

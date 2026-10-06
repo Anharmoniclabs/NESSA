@@ -280,3 +280,18 @@ class Scaffolding(unittest.TestCase):
         result = self.agent([[("finish", {"summary": "Built it."})]], finish_retries=1).run("build a game")
         self.assertEqual(result.status, "no_change")
         self.assertIn("none were made", result.summary)
+
+
+class BareToolArguments(Base):
+    def test_bare_arguments_run_the_only_matching_tool(self):
+        steps = ['{\n  "command": "echo hi > out.txt",\n  "timeout": 5\n}', [("finish", {"summary": "ran it"})]]
+        result = self.agent(steps).run("run the setup command")
+        self.assertTrue((self.proj / "out.txt").exists())
+        self.assertNotEqual(result.summary.strip()[:1], "{")
+
+    def test_ambiguous_or_unknown_keys_are_not_guessed(self):
+        agent = self.agent(["x"])
+        self.assertIsNone(agent._bare_call('{"path": "calc.py"}', ["read_file", "outline", "list_dir"]))
+        self.assertIsNone(agent._bare_call('{"bogus": 1}', ["run_command"]))
+        call = agent._bare_call('{"command": "ls"}', ["run_command", "read_file"])
+        self.assertEqual((call.name, call.arguments), ("run_command", {"command": "ls"}))
