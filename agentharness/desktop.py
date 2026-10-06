@@ -26,6 +26,15 @@ APPLYABLE = ('verified', 'unverified')
 APPLY_COMMAND = re.compile(r'\s*apply( the)? (changes|patch)( to (the )?project)?[.!\s]*', re.I)
 
 
+def preview(value, lines: int = 4, width: int = 140) -> str:
+    """Short, readable preview of a tool argument for a permission prompt (full text is in evidence)."""
+    text = str(value)
+    rows = text.splitlines() or ['']
+    shown = [row[:width] + ('…' if len(row) > width else '') for row in rows[:lines]]
+    more = f'   … {len(rows)} lines in total' if len(rows) > lines else ''
+    return '\n      '.join(shown) + more
+
+
 class Chat:
     def __init__(self, directory, data):
         self.directory, self.data = directory, data
@@ -88,7 +97,7 @@ class Chat:
 
     def permit(self, name, args):
         """Per-action permission in direct mode, shown in the same approval panel as plans."""
-        detail = [f'{key}: {str(value)[:400]}' for key, value in args.items()]
+        detail = [f'{key}: {preview(value)}' for key, value in args.items()]
         allowed, feedback = self.approve(dict(goal=f'Allow {name}?', steps=detail, files=[], checks=[]))
         return allowed, feedback, False
 

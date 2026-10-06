@@ -265,12 +265,12 @@ class Window:
         body = self.approval_card.body
         body.columnconfigure(0, weight=1)
         self.approval_title = tk.Label(body, text='', bg=SURFACE, fg=ACCENT, font=(FONT, 8, 'bold'), anchor='w')
-        self.approval_title.grid(row=0, column=0, columnspan=3, sticky='ew', pady=(2, 4))
+        self.approval_title.grid(row=0, column=0, sticky='w', pady=(2, 4))
         self.plan_label = tk.Label(body, text='', bg=SURFACE, fg=TEXT, font=(FONT, 10), justify='left',
-                                   anchor='w', wraplength=700)
-        self.plan_label.grid(row=1, column=0, columnspan=3, sticky='ew')
-        buttons = tk.Frame(body, bg=SURFACE)
-        buttons.grid(row=2, column=0, columnspan=3, sticky='e', pady=(10, 0))
+                                   anchor='w', wraplength=560)
+        self.plan_label.grid(row=1, column=0, sticky='ew')
+        buttons = tk.Frame(body, bg=SURFACE)  # top-right, so a long request can never hide the buttons
+        buttons.grid(row=0, column=1, rowspan=2, sticky='ne')
         ttk.Button(buttons, text='Not now', command=lambda: self.decide(False)).pack(side='right')
         self.approve_button = ttk.Button(buttons, text='Approve', style='Accent.TButton',
                                          command=lambda: self.decide(True))
@@ -676,8 +676,8 @@ class Window:
                 self.approve_button.configure(text='Allow' if permission else 'Approve plan',
                                               style='Warn.TButton' if permission else 'Accent.TButton')
                 self.approval_card.set_outline(color)
-                lines = 2 + len(plan.get('steps', [])) + sum(len(str(s)) // 90 for s in plan.get('steps', []))
-                self.approval_card.configure(height=min(320, 96 + 20 * lines))
+                lines = self.plan_label.cget('text').count('\n') + 1
+                self.approval_card.configure(height=min(300, 64 + 19 * lines))
                 self.approval.grid(row=3, column=0, sticky='ew', pady=(6, 4))
                 status = 'Waiting for your permission' if permission else 'Waiting for your plan approval'
             else:
