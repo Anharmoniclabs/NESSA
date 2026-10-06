@@ -336,3 +336,25 @@ class ModelPickerTests(unittest.TestCase):
             app._note_failures([model + ': HTTP 402: credits'])
         client, fast = app._clients({'max_tokens': 100, 'temperature': 0, 'reasoning_effort': None}, None, None)
         self.assertEqual(client.model, 'nessa-lfm-32k:latest')  # straight to on-device, no cloud round trips
+
+
+class AllowAllTests(unittest.TestCase):
+    wait = DesktopTests.wait
+
+    def setUp(self):
+        DesktopTests.setUp(self)
+        self.app = App(self.root / 'aa', 'http://127.0.0.1:11435/v1', 'nessa-lfm-32k:latest', enterprise=True)
+        self.key = self.app.create(str(self.project))['id']
+
+    def test_allow_all_approves_this_and_every_later_action(self):
+        import threading
+        chat = self.app.chats[self.key]
+        answers = []
+        worker = threading.Thread(target=lambda: answers.append(chat.permit('write_file', {'path': 'a.py'})))
+        worker.start()
+        self.wait(lambda: self.app.snapshot(self.key)['plan'] is not None)
+        self.app.decide(self.key, True, allow_all=True)
+        worker.join(3)
+        self.assertEqual(answers, [(True, '', False)])
+        self.assertEqual(chat.permit('dev_start', {'name': 'game'}), (True, '', False))  # no prompt
+        self.assertIsNone(self.app.snapshot(self.key)['plan'])

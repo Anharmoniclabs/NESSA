@@ -267,11 +267,12 @@ class Window:
         self.approval_title = tk.Label(body, text='', bg=SURFACE, fg=ACCENT, font=(FONT, 8, 'bold'), anchor='w')
         self.approval_title.grid(row=0, column=0, sticky='w', pady=(2, 4))
         self.plan_label = tk.Label(body, text='', bg=SURFACE, fg=TEXT, font=(FONT, 10), justify='left',
-                                   anchor='w', wraplength=560)
+                                   anchor='w', wraplength=470)
         self.plan_label.grid(row=1, column=0, sticky='ew')
         buttons = tk.Frame(body, bg=SURFACE)  # top-right, so a long request can never hide the buttons
         buttons.grid(row=0, column=1, rowspan=2, sticky='ne')
         ttk.Button(buttons, text='Not now', command=lambda: self.decide(False)).pack(side='right')
+        self.allow_all_button = ttk.Button(buttons, text='Allow all', command=lambda: self.decide(True, True))
         self.approve_button = ttk.Button(buttons, text='Approve', style='Accent.TButton',
                                          command=lambda: self.decide(True))
         self.approve_button.pack(side='right', padx=8)
@@ -538,9 +539,9 @@ class Window:
         except Exception as exc:
             messagebox.showerror('Unable to send', str(exc))
 
-    def decide(self, approved):
+    def decide(self, approved, allow_all=False):
         if self.current:
-            self.app.decide(self.current, approved)
+            self.app.decide(self.current, approved, allow_all)
             self.approval.grid_remove()
 
     def apply_changes(self):
@@ -612,6 +613,9 @@ class Window:
             d = self.app.snapshot(self.current)
             self.project.configure(text=('▸  ' + Path(d['project']).name + ('   ·   editing in place' if self.enterprise else
                                                                             '   ·   private copy')) if d['project'] else '')
+            if d.get('allow_all'):
+                self.project.configure(text=(self.project.cget('text') + '   ·   ' if d['project'] else '')
+                                       + 'all actions allowed in this chat')
             turn = current_turn(d['activity']) if d['busy'] else []
             fingerprint = json.dumps([self.current, d['messages'], d.get('partial'), len(turn)])
             if fingerprint != self.rendered:
@@ -673,6 +677,10 @@ class Window:
                 self.approval_title.configure(text='PERMISSION NEEDED' if permission else 'PLAN FOR YOUR APPROVAL', fg=color)
                 self.plan_label.configure(text=plan.get('goal', '') + '\n' + '\n'.join(
                     ('    ' if permission else '  •  ') + str(s) for s in plan.get('steps', [])))
+                if permission:
+                    self.allow_all_button.pack(side='right', padx=(8, 0))
+                else:
+                    self.allow_all_button.pack_forget()
                 self.approve_button.configure(text='Allow' if permission else 'Approve plan',
                                               style='Warn.TButton' if permission else 'Accent.TButton')
                 self.approval_card.set_outline(color)

@@ -97,6 +97,8 @@ class Chat:
 
     def permit(self, name, args):
         """Per-action permission in direct mode, shown in the same approval panel as plans."""
+        if self.data.get('allow_all'):  # the user chose "Allow all" for this conversation
+            return True, '', False
         detail = [f'{key}: {preview(value)}' for key, value in args.items()]
         allowed, feedback = self.approve(dict(goal=f'Allow {name}?', steps=detail, files=[], checks=[]))
         return allowed, feedback, False
@@ -431,11 +433,14 @@ class App:
         with chat.lock:
             return json.loads(json.dumps(chat.data))
 
-    def decide(self, key, approved):
+    def decide(self, key, approved, allow_all=False):
         chat = self.chats[key]
         with chat.lock:
             if chat.data['plan'] is None:
                 raise ValueError('No plan is awaiting approval.')
+            if allow_all and approved:
+                chat.data['allow_all'] = True  # later actions in this conversation run without asking
+                chat.save()
             chat.answer = (bool(approved), '')
             chat.decision.set()
 
