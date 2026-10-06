@@ -115,6 +115,16 @@ class Window:
         style.map('Warn.TButton', background=[('active', '#F8C676')])
         style.configure('Suggest.TButton', background=SURFACE, foreground='#C9CED6', padding=(16, 12), font=(FONT, 10))
         style.map('Suggest.TButton', background=[('active', RAISED)], foreground=[('active', TEXT)])
+        style.configure('Model.TCombobox', fieldbackground=RAISED, background=RAISED, foreground=TEXT,
+                        arrowcolor=MUTED, bordercolor=BORDER, lightcolor=RAISED, darkcolor=RAISED,
+                        selectbackground=RAISED, selectforeground=TEXT, padding=(8, 4))
+        style.map('Model.TCombobox', fieldbackground=[('readonly', RAISED)], foreground=[('readonly', TEXT)],
+                  arrowcolor=[('active', TEXT)])
+        root.option_add('*TCombobox*Listbox.background', SURFACE)
+        root.option_add('*TCombobox*Listbox.foreground', TEXT)
+        root.option_add('*TCombobox*Listbox.selectBackground', ACCENT)
+        root.option_add('*TCombobox*Listbox.selectForeground', '#0F1115')
+        root.option_add('*TCombobox*Listbox.font', (FONT, 10))
         style.configure('TNotebook', background=BG, borderwidth=0)
         style.configure('TNotebook.Tab', background=PANEL, foreground=MUTED, padding=(16, 8), font=(FONT, 10))
         style.map('TNotebook.Tab', background=[('selected', SURFACE)], foreground=[('selected', TEXT)])
@@ -270,6 +280,14 @@ class Window:
         self.model_label = tk.Label(controls, text='●  Ready', bg=RAISED, fg=MUTED, font=(FONT, 8, 'bold'),
                                     padx=9, pady=4)
         self.model_label.pack(side='left', padx=4)
+        # Model picker: Auto (cloud first), a specific cloud model, or any installed local model.
+        self.model_options = []
+        self.model_var = tk.StringVar()
+        self.model_picker = ttk.Combobox(controls, textvariable=self.model_var, state='readonly', width=34,
+                                         style='Model.TCombobox', font=(FONT, 9), postcommand=self.load_models)
+        self.model_picker.pack(side='left', padx=(6, 0))
+        self.model_picker.bind('<<ComboboxSelected>>', self.choose_model)
+        self.root.after(200, self.load_models)
         self.send_button = ttk.Button(controls, text='↑', width=3, style='Accent.TButton', command=self.send)
         self.send_button.pack(side='right')
         self.stop_button = ttk.Button(controls, text='■  Stop', command=self.stop, state='disabled')
@@ -317,6 +335,30 @@ class Window:
         scroll.pack(side='right', fill='y')
         text.pack(fill='both', expand=True)
         return text
+
+    def load_models(self):
+        try:
+            self.model_options = self.app.model_options()
+        except Exception:
+            self.model_options = []
+        if not self.model_options:
+            self.model_picker.configure(values=['No models found'])
+            return
+        self.model_picker.configure(values=[label for label, _ in self.model_options])
+        current = next((label for label, choice in self.model_options if choice == self.app.model_choice), None)
+        self.model_var.set(current or 'Choose a model')
+
+    def choose_model(self, _=None):
+        index = self.model_picker.current()
+        if 0 <= index < len(self.model_options):
+            label, choice = self.model_options[index]
+            try:
+                self.app.set_model(choice)
+                self.status.configure(text=f'Next messages use {label}.')
+            except ValueError as exc:
+                messagebox.showerror('Model not available', str(exc))
+                self.load_models()
+        self.input.focus_set()
 
     def speaker(self, name, note=''):
         """Assistant header line: the brand glyph, the name and an optional state."""

@@ -100,6 +100,14 @@ class App:
         self.root, self.base_url, self.model = Path(root), base_url, model
         self.profile, self.cloud, self.enterprise = profile, cloud, enterprise
         self.scratch_root = Path.home() / 'Projects' / 'nessa-scratch'
+        self.settings_path = self.root / 'settings.json'
+        self.unavailable: dict[str, str] = {}  # cloud model -> last failure reason seen this session
+        try:
+            saved = json.loads(self.settings_path.read_text()).get('model_choice', '')
+        except (OSError, ValueError):
+            saved = ''
+        valid = saved and (cloud or not saved.startswith(('auto', 'cloud:')))
+        self.model_choice = saved if valid else ('auto' if cloud else 'local:' + model)
         self.recorder = None
         self.cloud_token = None
         if cloud:
@@ -132,6 +140,65 @@ class App:
             d.update(busy=False, plan=None, partial='')
             self.chats[d['id']] = Chat(p.parent, d)
             self.chats[d['id']].save()
+
+    def model_options(self) -> list[tuple[str, str]]:
+        """(label, choice) pairs for the picker: auto, cloud models, then installed local models."""
+        options = []
+        if self.cloud:
+            from . import cloud as cloud_models
+            options.append(('Auto · cloud first, on-device fallback', 'auto'))
+            for model in cloud_models.DEFAULT_MODELS:
+                note = self.unavailable.get(model)
+                options.append((model.split('/')[-1] + ' · cloud' + (f' ({note})' if note else ''), 'cloud:' + model))
+        try:
+            local = ChatClient(self.base_url, self.model, timeout=5, retries=1).models()
+        except Exception:
+            local = [self.model]
+        options += [(m.removesuffix(':latest') + ' · on-device', 'local:' + m) for m in local if m]
+        return options
+
+    def set_model(self, choice: str):
+        if choice.startswith(('auto', 'cloud:')) and not self.cloud:
+            raise ValueError('Cloud models are off; start Nessa without --local to use them.')
+        self.model_choice = choice
+        atomic_json(self.settings_path, dict(model_choice=choice))
+
+    def _note_failures(self, errors):
+        for error in errors:
+            model, _, detail = error.partition(': ')
+            self.unavailable[model] = 'no credits' if ('402' in detail or 'credits' in detail) else 'unavailable'
+
+    def _clients(self, profile, stream, chat):
+        """Main and conversation clients for the selected model."""
+        choice = self.model_choice
+        if choice.startswith('local:'):
+            name = choice[len('local:'):]
+            client = ChatClient(self.base_url, name, max_tokens=profile['max_tokens'],
+                                temperature=profile['temperature'], reasoning_effort=profile['reasoning_effort'])
+            fast = ChatClient(self.base_url, name, max_tokens=1536, temperature=0.2, timeout=900, retries=1,
+                              reasoning_effort='none', on_delta=stream)
+            return client, fast
+        client = ChatClient(self.base_url, self.model, max_tokens=profile['max_tokens'],
+                            temperature=profile['temperature'], reasoning_effort=profile['reasoning_effort'])
+        fast = ChatClient(self.chat_base_url, self.chat_model, max_tokens=1536,  # LFM thinks before replying
+                          temperature=0.2, timeout=900, retries=1, reasoning_effort='none', on_delta=stream)
+        if not self.cloud:
+            return client, fast
+        from . import cloud as cloud_models
+
+        def switch(old, new, errors):
+            self._note_failures(errors)
+            chat.event('model_switched', dict(previous=old, model=new, errors=errors))
+        if choice.startswith('cloud:'):  # exactly the chosen model: no silent fallback
+            models, main_chain, chat_chain = (choice[len('cloud:'):],), [], []
+        else:
+            models, main_chain, chat_chain = cloud_models.DEFAULT_MODELS, [client], [fast]
+        client = cloud_models.FallbackClient(cloud_models.cloud_clients(self.cloud_token, models, max_tokens=4096)
+                                             + main_chain, on_switch=switch, recorder=self.recorder, on_failure=self._note_failures)
+        fast = cloud_models.FallbackClient(cloud_models.cloud_clients(self.cloud_token, models, max_tokens=1536)
+                                           + chat_chain, on_switch=switch, recorder=self.recorder, on_failure=self._note_failures)
+        fast.on_delta = stream
+        return client, fast
 
     def create(self, project=None):
         project = Path(project).expanduser().resolve() if project else None
@@ -242,23 +309,8 @@ class App:
                         chat.data['result'] = RunResult('answered', answer, '', 0, [], None).to_dict()
                     return
             profile = PROFILES[self.profile]
-            client = ChatClient(self.base_url, self.model, max_tokens=profile['max_tokens'],
-                                temperature=profile['temperature'], reasoning_effort=profile['reasoning_effort'])
             stream = None if is_news_query(message) else chat.delta
-            fast = ChatClient(self.chat_base_url, self.chat_model, max_tokens=1536,  # LFM thinks before replying
-                              temperature=0.2, timeout=180, retries=1, reasoning_effort='none',
-                              on_delta=stream)
-            if self.cloud:
-                from . import cloud as cloud_models
-                switch = lambda old, new, errors: chat.event('model_switched', dict(previous=old, model=new,
-                                                                                  errors=errors))
-                client = cloud_models.FallbackClient(
-                    cloud_models.cloud_clients(self.cloud_token, max_tokens=4096) + [client],
-                    on_switch=switch, recorder=self.recorder)
-                fast = cloud_models.FallbackClient(
-                    cloud_models.cloud_clients(self.cloud_token, max_tokens=1536) + [fast],
-                    on_switch=switch, recorder=self.recorder)
-                fast.on_delta = stream
+            client, fast = self._clients(profile, stream, chat)
             work_directory = Path(chat.data.get('work_directory', chat.directory))
             if not (work_directory / 'repo').exists() and not (work_directory / 'DIRECT').exists():
                 if chat.data['project']:

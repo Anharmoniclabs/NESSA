@@ -53,12 +53,13 @@ def cloud_clients(token: str, models=DEFAULT_MODELS, *, max_tokens: int = 4096,
 class FallbackClient:
     """Duck-types ChatClient; `model`/`base_url` describe the client that served the last call."""
 
-    def __init__(self, clients: list, on_switch=None, clock=time.monotonic, recorder=None):
+    def __init__(self, clients: list, on_switch=None, clock=time.monotonic, recorder=None, on_failure=None):
         if not clients:
             raise ValueError("FallbackClient needs at least one client")
         self.clients = list(clients)
         self.active = self.clients[0]
         self.on_switch = on_switch
+        self.on_failure = on_failure  # called with the errors when every client failed
         self.clock = clock
         self.skip_until: dict[int, float] = {}
         self.failures: list[str] = []
@@ -102,4 +103,6 @@ class FallbackClient:
                 if self.on_switch:
                     self.on_switch(previous.model, client.model, errors)
             return reply
+        if self.on_failure:
+            self.on_failure(errors)
         raise ModelError("All models unavailable: " + " | ".join(errors))

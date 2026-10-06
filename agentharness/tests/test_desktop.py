@@ -269,3 +269,53 @@ class DesktopEnterpriseTests(unittest.TestCase):
         games = list((self.root / 'scratch').rglob('game.py'))
         self.assertEqual(len(games), 1)
         self.assertFalse((self.app.chats[key].directory / 'repo').exists())
+
+
+class ModelPickerTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def app(self, cloud):
+        with patch('agentharness.cloud.load_token', return_value='hf_test'):
+            return App(self.root / 'sessions', 'http://127.0.0.1:11435/v1', 'nessa-lfm-32k:latest',
+                       profile='lfm-32k', cloud=cloud)
+
+    def test_options_list_auto_cloud_and_installed_local_models(self):
+        app = self.app(cloud=True)
+        with patch('agentharness.desktop.ChatClient.models', return_value=['nessa-lfm-32k:latest', 'qwen2.5-coder:3b']):
+            options = app.model_options()
+        choices = [c for _, c in options]
+        self.assertEqual(choices[0], 'auto')
+        self.assertIn('cloud:zai-org/GLM-5.3', choices)
+        self.assertIn('local:qwen2.5-coder:3b', choices)
+        self.assertEqual(app.model_choice, 'auto')
+
+    def test_choice_persists_and_local_choice_uses_only_that_model(self):
+        app = self.app(cloud=True)
+        app.set_model('local:qwen2.5-coder:3b')
+        again = self.app(cloud=True)
+        self.assertEqual(again.model_choice, 'local:qwen2.5-coder:3b')
+        client, fast = again._clients({'max_tokens': 100, 'temperature': 0, 'reasoning_effort': None}, None, None)
+        self.assertEqual((client.model, fast.model), ('qwen2.5-coder:3b', 'qwen2.5-coder:3b'))
+
+    def test_specific_cloud_model_has_no_silent_fallback(self):
+        app = self.app(cloud=True)
+        app.set_model('cloud:moonshotai/Kimi-K3')
+        client, fast = app._clients({'max_tokens': 100, 'temperature': 0, 'reasoning_effort': None}, None, None)
+        self.assertEqual([c.model for c in client.clients], ['moonshotai/Kimi-K3'])
+        self.assertEqual([c.model for c in fast.clients], ['moonshotai/Kimi-K3'])
+
+    def test_failures_are_labelled_in_the_picker(self):
+        app = self.app(cloud=True)
+        app._note_failures(['zai-org/GLM-5.3: HTTP 402: You have depleted your monthly included credits'])
+        with patch('agentharness.desktop.ChatClient.models', return_value=[]):
+            labels = [label for label, _ in app.model_options()]
+        self.assertIn('GLM-5.3 · cloud (no credits)', labels)
+
+    def test_cloud_choices_refused_when_cloud_is_off(self):
+        app = self.app(cloud=False)
+        self.assertEqual(app.model_choice, 'local:nessa-lfm-32k:latest')
+        with self.assertRaises(ValueError):
+            app.set_model('auto')
