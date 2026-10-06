@@ -73,6 +73,12 @@ user's project. Edits change the real files; the user's permission mode decides 
 their approval. A snapshot from the start of the session allows show_diff and undo_file.""").replace(
     "The controller re-runs the checks; if they fail you will be asked to fix them.",
     "Configured finish hooks may run; if they fail you will be asked to fix them.")
+LAUNCH_GUIDANCE = """
+Launching for the user: run_command waits for the program to exit, so never use it for a game, GUI
+or server. Start those with dev_start (argv, e.g. ["python3", "game.py"]); windows open on the
+user's desktop. Programs here get no keyboard input from a terminal, so make interactive programs
+GUI programs (tkinter is in the standard library) rather than input()-based console programs.
+Confirm the launch with dev_status and dev_logs; a web health check is only for web servers."""
 DELEGATION_GUIDANCE = """
 Delegation: the agent tool runs a subagent with its own fresh context and returns only its report.
 Use explore for broad searches across many files, plan for designing a multi-file change, and
@@ -467,7 +473,7 @@ class Agent:
             lines = [f"- {t.name}: {t.description} schema=" + json.dumps(t.schema()["function"]["parameters"])
                      for t in self.tools.values() if offered is None or t.name in offered]
             return CHAT_PROMPT + studio_context + '\nFor tool use only:' + TEXT_MODE_SUFFIX + '\n'.join(lines)
-        base = (DIRECT_SYSTEM_PROMPT if self.ws.direct else SYSTEM_PROMPT) + (
+        base = (DIRECT_SYSTEM_PROMPT + LAUNCH_GUIDANCE if self.ws.direct else SYSTEM_PROMPT) + (
             DELEGATION_GUIDANCE if "agent" in self.tools else "")
         if self.config.tool_mode != "text":
             return base + "\n\nUse the provided native function tools to act. " \

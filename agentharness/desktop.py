@@ -99,6 +99,7 @@ class App:
                  profile='lfm-i3-12gb', cloud=False, enterprise=False):
         self.root, self.base_url, self.model = Path(root), base_url, model
         self.profile, self.cloud, self.enterprise = profile, cloud, enterprise
+        self.scratch_root = Path.home() / 'Projects' / 'nessa-scratch'
         self.recorder = None
         self.cloud_token = None
         if cloud:
@@ -138,6 +139,8 @@ class App:
         directory = self.root / key
         if project:
             (Workspace.direct if self.enterprise else Workspace.create)(project, directory)
+        elif self.enterprise:
+            directory.mkdir(parents=True)  # a visible scratch folder is created on first use
         else:
             # Plain conversations get an empty private workspace, never the cwd.
             (directory / 'repo').mkdir(parents=True)
@@ -258,7 +261,14 @@ class App:
                 fast.on_delta = stream
             work_directory = Path(chat.data.get('work_directory', chat.directory))
             if not (work_directory / 'repo').exists() and not (work_directory / 'DIRECT').exists():
-                (Workspace.direct if self.enterprise else Workspace.create)(Path(chat.data['project']), work_directory)
+                if chat.data['project']:
+                    (Workspace.direct if self.enterprise else Workspace.create)(Path(chat.data['project']), work_directory)
+                else:
+                    # Enterprise chats without a project write real, visible files the user can run.
+                    scratch = self.scratch_root / time.strftime('%Y%m%d') / chat.data['id'][:8]
+                    scratch.mkdir(parents=True, exist_ok=True)
+                    Workspace.direct(scratch, work_directory)
+                    chat.event('scratch_folder', dict(path=str(scratch)))
             ws = Workspace.open(work_directory)
             checks = CheckRunner(detect_checks(ws.repo))
             enterprise = {}

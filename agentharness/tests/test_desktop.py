@@ -247,3 +247,25 @@ class DesktopEnterpriseTests(unittest.TestCase):
         self.app.decide(self.key, True)
         worker.join(3)
         self.assertEqual(answers, [(True, '', False)])
+
+    def test_chat_without_project_writes_visible_scratch_files(self):
+        seen = {}
+
+        class FakeAgent:
+            def __init__(inner, client, ws, **kw):
+                inner.ws, inner.kw = ws, kw
+
+            def run(inner, task, **kw):
+                seen.update(direct=inner.ws.direct, mode=inner.kw['config'].permission_mode,
+                            plan_first=inner.kw['config'].plan_first)
+                (inner.ws.repo / 'game.py').write_text('print("hi")\n')
+                return RunResult('completed', 'Wrote game.py', '', 1, ['game.py'], None)
+        self.app.scratch_root = self.root / 'scratch'
+        key = self.app.create()['id']
+        with patch('agentharness.desktop.Agent', FakeAgent):
+            self.app.send(key, 'write a python game super simple and launch')
+            self.wait(lambda: not self.app.snapshot(key)['busy'])
+        self.assertEqual(seen, dict(direct=True, mode='default', plan_first=False))
+        games = list((self.root / 'scratch').rglob('game.py'))
+        self.assertEqual(len(games), 1)
+        self.assertFalse((self.app.chats[key].directory / 'repo').exists())

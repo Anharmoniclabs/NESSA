@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
 
+from . import narrate
 from .desktop import App
 
 BG = '#202022'
@@ -128,6 +129,8 @@ class Window:
         self.chat.tag_configure('assistant', foreground=ACCENT, font=(FONT, 10, 'bold'), spacing1=22, spacing3=8)
         self.chat.tag_configure('user_body', background=SURFACE, lmargin1=16, lmargin2=16, rmargin=16, spacing1=10, spacing3=14)
         self.chat.tag_configure('meta', foreground=MUTED, font=(FONT, 9))
+        self.chat.tag_configure('thinking', foreground=MUTED, font=(FONT, 9, 'italic'), lmargin1=12, lmargin2=12,
+                                spacing3=6)
         self.chat.tag_configure('bold', font=(FONT, 11, 'bold'))
         self.chat.tag_configure('heading', font=(FONT, 14, 'bold'), spacing1=14, spacing3=10)
         self.chat.tag_configure('code', background=PANEL, foreground='#d3cbe1', font=('DejaVu Sans Mono', 10), lmargin1=16, lmargin2=16, spacing1=4, spacing3=4)
@@ -386,7 +389,8 @@ class Window:
         if self.current:
             d = self.app.snapshot(self.current)
             self.project.configure(text=('Project · '+Path(d['project']).name) if d['project'] else '')
-            fingerprint = json.dumps([self.current, d['messages'], d.get('partial')])
+            turn = current_turn(d['activity']) if d['busy'] else []
+            fingerprint = json.dumps([self.current, d['messages'], d.get('partial'), len(turn)])
             if fingerprint != self.rendered:
                 if d['messages']:
                     self.hero.grid_remove()
@@ -404,13 +408,22 @@ class Window:
                         self.render_reply(m['content'])
                     if m.get('status') not in (None, 'answered'):
                         self.chat.insert('end', m['status'].replace('_', ' ')+'\n\n', 'meta')
+                if d['busy'] and not d.get('partial') and turn:
+                    # What Nessa is doing right now: real events plus the model's own reasoning.
+                    self.chat.insert('end', '✳  Nessa · working\n', 'assistant')
+                    reasoning = narrate.latest_reasoning(turn)
+                    if reasoning:
+                        self.chat.insert('end', 'Reasoning: ' + reasoning + '\n', 'thinking')
+                    for line in narrate.feed(turn):
+                        self.chat.insert('end', line + '\n', 'meta')
+                    self.chat.insert('end', '\n')
                 if d.get('partial'):
                     self.chat.insert('end', '✳  Nessa\n', 'assistant')
                     self.render_reply(d['partial'])
                 self.chat.configure(state='disabled')
                 self.chat.see('end')
                 self.rendered = fingerprint
-            activity = '\n\n'.join(e['event'].replace('_', ' ').upper()+'\n'+json.dumps(e['data'], ensure_ascii=False, indent=2) for e in d['activity'])
+            activity = activity_text(d['activity'])
             if self.activity.get('1.0', 'end-1c') != activity:
                 self.set_text(self.activity, activity)
                 self.activity.see('end')
@@ -431,9 +444,11 @@ class Window:
             self.stop_button.configure(state='normal' if d['busy'] else 'disabled')
             if d['plan']:
                 plan = d['plan']
-                self.plan_label.configure(text='PLAN APPROVAL\n'+plan.get('goal', '')+'\n'+'\n'.join(str(s) for s in plan.get('steps', [])))
+                permission = str(plan.get('goal', '')).startswith('Allow ')
+                self.plan_label.configure(text=('PERMISSION\n' if permission else 'PLAN APPROVAL\n')+plan.get('goal', '')
+                                          +'\n'+'\n'.join(str(s) for s in plan.get('steps', [])))
                 self.approval.grid(row=3, column=0, sticky='ew')
-                status = 'Waiting for your plan approval'
+                status = 'Waiting for your permission' if permission else 'Waiting for your plan approval'
             else:
                 self.approval.grid_remove()
                 status = 'Nessa is thinking'+'.' * (1 + int(time.monotonic()) % 3)+'   '+str(int(time.monotonic()-self.started))+'s' if d['busy'] else ''
@@ -447,7 +462,7 @@ class Window:
             elif d['busy'] and d.get('partial'):
                 status = 'Nessa is replying…'
             active = d.get('active_model', '')
-            label = 'Local LFM' if active.startswith('nessa-lfm:') else 'Local chat'
+            label = (active + ' · cloud') if '/' in active else ('Local ' + active if active else 'Local chat')
             self.model_label.configure(text='✳  ' + label)
             if not self.creating:
                 self.status.configure(text=status)
@@ -459,6 +474,25 @@ class Window:
             return
         self.app.shutdown()
         self.root.destroy()
+
+
+def current_turn(activity):
+    """Events since the latest user message (each turn starts by loading conversation memory)."""
+    starts = [i for i, e in enumerate(activity) if e.get('event') == 'memory_loaded']
+    return activity[starts[-1]:] if starts else activity
+
+
+def activity_text(activity):
+    lines = []
+    for entry in activity:
+        line = narrate.narrate(entry.get('event', ''), entry.get('data') or {})
+        reasoning = str((entry.get('data') or {}).get('reasoning') or '').strip() if entry.get('event') == 'model' else ''
+        stamp = time.strftime('%H:%M:%S', time.localtime(entry.get('time', 0)))
+        if reasoning:
+            lines.append(f'{stamp}  Reasoning: {reasoning[:1500]}')
+        if line:
+            lines.append(f'{stamp}  {line}')
+    return '\n'.join(lines) or 'No activity yet.'
 
 
 def main():
