@@ -53,7 +53,7 @@ def cloud_clients(token: str, models=DEFAULT_MODELS, *, max_tokens: int = 4096,
 class FallbackClient:
     """Duck-types ChatClient; `model`/`base_url` describe the client that served the last call."""
 
-    def __init__(self, clients: list, on_switch=None, clock=time.monotonic):
+    def __init__(self, clients: list, on_switch=None, clock=time.monotonic, recorder=None):
         if not clients:
             raise ValueError("FallbackClient needs at least one client")
         self.clients = list(clients)
@@ -62,6 +62,7 @@ class FallbackClient:
         self.clock = clock
         self.skip_until: dict[int, float] = {}
         self.failures: list[str] = []
+        self.recorder = recorder  # distill.Recorder: keeps cloud (teacher) replies for local training
 
     def __getattr__(self, name):  # model, base_url, max_tokens, on_delta, ...
         return getattr(self.__dict__["active"], name)
@@ -91,6 +92,11 @@ class FallbackClient:
                 errors.append(f"{client.model}: {text[:200]}")
                 self.failures.append(errors[-1])
                 continue
+            if self.recorder is not None and getattr(client, "base_url", "") == HF_ROUTER:
+                try:
+                    self.recorder.turn(client.model, messages, tools, reply)
+                except OSError:
+                    pass  # recording must never break a conversation
             if client is not self.active:
                 previous, self.active = self.active, client
                 if self.on_switch:

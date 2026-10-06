@@ -59,6 +59,20 @@ they are unavailable or credits run out. The token comes from `HF_TOKEN` or `~/D
 **This sends prompts and project content to Hugging Face and its providers.**
 `python -m agentharness doctor --cloud` shows which cloud models currently answer.
 
+### Distilling cloud work into local models
+
+With `--cloud`, every cloud reply (chat and agent work) is recorded locally with the exact context
+and tools it saw, in `~/.agentharness/distill/`. Local-model replies are never recorded.
+
+```bash
+python -m agentharness distill stats                               # turns per teacher / outcome
+python -m agentharness distill export --out nessa-distill.jsonl    # good runs only, secrets scrubbed
+```
+
+Train on a free Colab/Kaggle T4 with `notebooks/nessa_distill_lora.ipynb` (Qwen2.5-Coder 0.5B–3B,
+LoRA, GGUF export), then `ollama create` the result and use it as `--model` or `--subagent-model`.
+Disable recording with `--no-distill`.
+
 ## Message-driven local agent
 
 NESSA now supports terminal chat, durable follow-ups/resume, operation receipts,

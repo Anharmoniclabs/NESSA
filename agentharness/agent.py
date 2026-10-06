@@ -1094,6 +1094,9 @@ class Agent:
     def run(self, task: str, *, resume: bool = False, message: str = "") -> RunResult:
         self.started = time.monotonic()
         self.task = task
+        recorder = getattr(self.client, "recorder", None)
+        if recorder is not None:
+            recorder.begin(f"{self.evidence_dir}#{time.time_ns()}")  # one id per user turn
         self.log("resume" if resume else "start", task=task, config=asdict(self.config), checks=self.checks.names(),
                  model=getattr(self.client, "model", None), project_config=self.project_config.path,
                  config_errors=self.project_config.errors, reattached=self.dev.reattached)
@@ -1224,6 +1227,11 @@ class Agent:
         (self.evidence_dir / "journal.json").write_text(json.dumps(self.ws.journal, indent=1))
         self._save_session(status)
         self.log("end", status=status, steps=self.steps, changed=result.changed_files)
+        if recorder is not None:
+            try:
+                recorder.outcome(status)
+            except OSError:
+                pass
         try:
             telemetry.export_run(self.evidence_dir, status, result.seconds, self.project_config.otlp_endpoint)
         except Exception as exc:  # observability must never change a run's outcome

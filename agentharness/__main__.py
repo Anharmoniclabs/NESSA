@@ -5,6 +5,7 @@
   extract FILES...        OCR/text + regex fields/tables -> CSV/JSON/Markdown
   config PROJECT [--mcp]  validate agentharness.toml (checks, dev, MCP, telemetry)
   lesson add|list         project-scoped notes injected into future runs
+  distill stats|export    cloud replies recorded for training local models
   transcript WORK         print a run's transcript (main agent and subagents)
   doctor                  check the model server and optional tools
 
@@ -55,8 +56,12 @@ def _client(a):
         print(f"[model] {old} unavailable -> using {new}", flush=True)
         for error in errors:
             print(f"        {error[:160]}", flush=True)
+    recorder = None
+    if not getattr(a, "no_distill", False):
+        from .distill import Recorder
+        recorder = Recorder()
     return cloud.FallbackClient(cloud.cloud_clients(token, models, max_tokens=max(a.max_tokens or 0, 4096))
-                                + [local], on_switch=switch)
+                                + [local], on_switch=switch, recorder=recorder)
 
 
 def _config(a, **over) -> AgentConfig:
@@ -385,6 +390,17 @@ def cmd_lesson(a) -> int:
     return 0
 
 
+def cmd_distill(a) -> int:
+    from . import distill
+    if a.action == "stats":
+        print(json.dumps(distill.stats(), indent=2))
+        return 0
+    n = distill.export(Path(a.out), include_unfinished=a.include_unfinished)
+    print(f"{n} training examples -> {a.out}")
+    print("Train: upload it to nessa-coder-lora/nessa_distill_lora.ipynb on a free Colab/Kaggle T4.")
+    return 0 if n else 1
+
+
 def cmd_doctor(a) -> int:
     ok = True
     if a.cloud:
@@ -438,6 +454,8 @@ def main(argv=None) -> int:
                              "Sends prompts and project content to Hugging Face providers.")
         sp.add_argument("--cloud-models", default=os.environ.get("AGENT_CLOUD_MODELS", ""),
                         help="comma-separated HF model ids in preference order")
+        sp.add_argument("--no-distill", action="store_true",
+                        help="with --cloud: do not record cloud replies for local-model training")
         sp.add_argument("--hf-token-file", default=None, help="token file (default: HF_TOKEN or ~/Desktop/HF)")
 
     def agent_args(sp):
@@ -553,6 +571,13 @@ def main(argv=None) -> int:
     t.add_argument("--agent", help="only this agent, e.g. main or sub-01-explore")
     t.add_argument("--full", action="store_true", help="include system prompts and untruncated text")
     t.set_defaults(fn=cmd_transcript)
+
+    ds = sub.add_parser("distill", help="cloud-teacher data for training local models")
+    ds.add_argument("action", choices=["stats", "export"])
+    ds.add_argument("--out", default="nessa-distill.jsonl")
+    ds.add_argument("--include-unfinished", action="store_true",
+                    help="also export turns from runs with no recorded outcome (e.g. crashed)")
+    ds.set_defaults(fn=cmd_distill)
 
     d = sub.add_parser("doctor", help="check setup")
     model_args(d)
