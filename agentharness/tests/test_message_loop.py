@@ -214,7 +214,7 @@ class MessageLoop(Base):
                   '--work', str(self.tmp / 'greeting-task')])
         self.assertEqual(len(client.seen), 2)
         self.assertIn('hey, explain calc.py', json.dumps(client.seen[0][0]))
-        self.assertIn('[model] Waiting for local model', output.getvalue())
+        self.assertIn('[model] Waiting for scripted', output.getvalue())
         self.assertNotIn('[baseline]', output.getvalue())
 
     def test_conversation_then_coding_requires_approval_before_baseline(self):
