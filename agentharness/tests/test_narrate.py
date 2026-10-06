@@ -42,3 +42,33 @@ class GuiHelpers(unittest.TestCase):
                     {'event': 'memory_loaded', 'data': {}}, {'event': 'model_started', 'data': {'model': 'm'}}]
         self.assertEqual(len(current_turn(activity)), 2)
         self.assertIn('Reasoning: a', activity_text(activity))
+
+
+class SelfUpdate(unittest.TestCase):
+    def setUp(self):
+        try:
+            from agentharness import gui
+        except ImportError as exc:
+            self.skipTest(str(exc))
+        self.gui = gui
+
+    def test_restart_only_when_nothing_would_be_lost(self):
+        restart = self.gui.should_restart
+        self.assertTrue(restart(True, False, '', False))
+        self.assertFalse(restart(False, False, '', False))   # no update
+        self.assertFalse(restart(True, True, '', False))     # a turn or approval is running
+        self.assertFalse(restart(True, False, 'half-typed', False))
+        self.assertFalse(restart(True, False, '', True))     # a project is being opened
+
+    def test_code_version_changes_when_a_module_changes(self):
+        import os
+        import time
+        before = self.gui.code_version()
+        target = self.gui.CODE / 'narrate.py'
+        stat = target.stat()
+        try:
+            os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+            self.assertNotEqual(self.gui.code_version(), before)
+        finally:
+            os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        self.assertEqual(self.gui.code_version(), before)

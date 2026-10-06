@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import os
 import queue
+import sys
 import threading
 import time
 import tkinter as tk
@@ -31,6 +33,23 @@ BORDER = '#262C36'
 FONT = 'Inter'
 DISPLAY = 'Inter Display'
 MONO = 'JetBrains Mono'
+
+
+CODE = Path(__file__).resolve().parent
+
+
+RELAUNCH_ARGS: list[str] = []  # launch flags without the one-off project argument
+
+
+def code_version() -> tuple:
+    """Fingerprint of the running code: any edit to a module or brand asset changes it."""
+    files = sorted(CODE.glob('*.py')) + sorted(BRAND.glob('*.png'))
+    return tuple((f.name, f.stat().st_mtime_ns) for f in files if f.is_file())
+
+
+def should_restart(update_pending: bool, busy: bool, draft: str, creating: bool) -> bool:
+    """Restart into new code only when nothing would be lost: no running turn, approval or draft."""
+    return update_pending and not busy and not draft.strip() and not creating
 
 
 def brand_image(name):
@@ -321,8 +340,15 @@ class Window:
         self.activity = self.text_tab(self.tabs, 'Activity')
         self.patch = self.text_tab(self.tabs, 'Changes')
         root.bind('<Control-n>', lambda _: self.new())
+        self.version = code_version()
+        self.update_pending = False
+        self.last_update_check = time.monotonic()
         self.refresh_history()
         self.new()
+        reopen = os.environ.pop('NESSA_REOPEN_CHAT', '')
+        if reopen in self.app.chats:  # returning from a self-update restart
+            self.current, self.rendered = reopen, None
+            self.refresh_history()
         if project:
             self.root.after(100, lambda: self.create(project))
         self.tick()
@@ -533,7 +559,40 @@ class Window:
         if self.current:
             self.app.stop(self.current)
 
+    def check_for_update(self):
+        """Keep the open window on the current code: restart into it as soon as Nessa is idle."""
+        if time.monotonic() - self.last_update_check < 3:
+            return
+        self.last_update_check = time.monotonic()
+        if not self.update_pending:
+            try:
+                self.update_pending = code_version() != self.version
+            except OSError:
+                return
+        if not self.update_pending:
+            return
+        busy = any(self.app.snapshot(key)['busy'] for key in list(self.app.chats))
+        if should_restart(True, busy, self.input.get('1.0', 'end-1c'), self.creating):
+            self.restart()
+        else:
+            self.connection_dot.configure(fg=ACCENT)
+            self.connection.configure(text='Update ready · applies when idle')
+
+    def restart(self):
+        """Replace this process with the updated code, reopening the same conversation."""
+        for chat in list(self.app.chats.values()):
+            with chat.lock:
+                chat.save()
+        if self.current:
+            os.environ['NESSA_REOPEN_CHAT'] = self.current
+        self.root.destroy()
+        # Saved conversations and kept-alive dev processes (e.g. a launched game) carry over.
+        print('Nessa: code updated; restarting into the new version', file=sys.stderr, flush=True)
+        os.chdir(CODE.parent)
+        os.execv(sys.executable, [sys.executable, '-m', 'agentharness.gui', *RELAUNCH_ARGS])
+
     def tick(self):
+        self.check_for_update()
         try:
             key, error = self.creation.get_nowait()
             self.creating = False
@@ -684,18 +743,19 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('project', nargs='?')
     p.add_argument('--base-url', default='http://127.0.0.1:11435/v1')
-    p.add_argument('--model', default='nessa-lfm:latest')
-    p.add_argument('--chat-model', default='nessa-lfm:latest')
+    p.add_argument('--model', default='nessa-lfm-32k:latest')
+    p.add_argument('--chat-model', default='nessa-lfm-32k:latest')
     p.add_argument('--chat-base-url', default='http://127.0.0.1:11435/v1')
     p.add_argument('--review-model', help='optional advisory reviewer; disabled by default')
     p.add_argument('--review-base-url', help='reviewer endpoint; defaults to the project model endpoint')
-    p.add_argument('--profile', default='lfm-i3-12gb', help='local model budget profile, e.g. lfm-32k')
+    p.add_argument('--profile', default='lfm-32k', help='local model budget profile, e.g. lfm-32k')
     p.add_argument('--cloud', action='store_true',
                    help='use Hugging Face cloud models first, local fallback; sends content to HF providers')
     p.add_argument('--enterprise', action='store_true',
                    help='project chats edit the project in place with per-action permission prompts')
     p.add_argument('--sessions', type=Path, default=Path.home() / '.agentharness/desktop-chats')
     args = p.parse_args()
+    RELAUNCH_ARGS[:] = [a for a in sys.argv[1:] if not args.project or a != args.project]
     root = tk.Tk(className='Nessa')  # matches StartupWMClass in nessa.desktop
     args.sessions.mkdir(parents=True, exist_ok=True)
     lock = (args.sessions / '.gui.lock').open('w')
