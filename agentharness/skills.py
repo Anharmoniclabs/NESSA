@@ -108,6 +108,9 @@ unless the user asks otherwise.
     ),
 }
 
+from .creative_skills import register as _creative_skills
+BUILTINS.update(_creative_skills(Skill))
+
 SCAFFOLD_RECIPE = BUILTINS["scaffold-project"].instructions
 
 

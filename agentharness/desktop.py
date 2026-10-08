@@ -211,8 +211,9 @@ class App:
         def switch(old, new, errors):
             self._note_failures(errors)
             chat.event('model_switched', dict(previous=old, model=new, errors=errors))
-        if choice.startswith('cloud:'):  # exactly the chosen model: no silent fallback
-            models, main_chain, chat_chain = (choice[len('cloud:'):],), [], []
+        if choice.startswith('cloud:'):
+            # Keep the user's chosen cloud model first, but preserve the local safety net.
+            models, main_chain, chat_chain = (choice[len('cloud:'):],), [client], [fast]
         else:
             # Auto skips models already known to be out of credits, so each turn doesn't retry them.
             models = tuple(m for m in cloud_models.DEFAULT_MODELS if self.unavailable.get(m) != 'no credits')

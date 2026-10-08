@@ -1,11 +1,15 @@
 """Cloud fallback: switching, cooldowns, fatal errors and token loading (no network)."""
 import os
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from agentharness import cloud
+from agentharness.__main__ import cmd_doctor
 from agentharness.llm import ContextOverflow, ModelError, Reply
 
 
@@ -26,7 +30,10 @@ class Fallback(unittest.TestCase):
         switches = []
         a, b = Fake("cloud", ModelError("HTTP 503: busy")), Fake("local", "hi")
         client = cloud.FallbackClient([a, b], on_switch=lambda *s: switches.append(s[:2]))
-        self.assertEqual(client.chat([]).content, "hi")
+        reply = client.chat([])
+        self.assertEqual(reply.content, "hi")
+        self.assertEqual([(a['model'], a['status']) for a in reply.inference['attempts']],
+                         [('cloud', 'error'), ('local', 'ok')])
         self.assertEqual(client.model, "local")
         self.assertEqual(switches, [("cloud", "local")])
 
@@ -86,6 +93,36 @@ class Token(unittest.TestCase):
     def test_cloud_clients_are_remote_and_fail_fast(self):
         [client] = cloud.cloud_clients("hf_x", ("org/m",))
         self.assertEqual((client.base_url, client.retries), (cloud.HF_ROUTER, 1))
+
+
+class Doctor(unittest.TestCase):
+    def test_cloud_check_fails_when_no_cloud_model_answers(self):
+        args = SimpleNamespace(cloud=True, hf_token_file=None, cloud_models='',
+                               base_url='http://127.0.0.1:11435/v1', model='local')
+        remote = Fake('cloud', ModelError('HTTP 402: no credits'))
+        local = mock.Mock()
+        local.models.return_value = ['local']
+        with mock.patch.object(cloud, 'load_token', return_value='hf_test'), \
+             mock.patch.object(cloud, 'cloud_clients', return_value=[remote]), \
+             mock.patch('agentharness.__main__._local_client', return_value=local), \
+             redirect_stdout(io.StringIO()) as output:
+            status = cmd_doctor(args)
+        self.assertEqual(status, 1)
+        self.assertIn('UNAVAILABLE', output.getvalue())
+
+    def test_cloud_check_passes_when_a_cloud_model_answers(self):
+        args = SimpleNamespace(cloud=True, hf_token_file=None, cloud_models='',
+                               base_url='http://127.0.0.1:11435/v1', model='local')
+        remote = Fake('cloud', 'pong')
+        local = mock.Mock()
+        local.models.return_value = ['local']
+        with mock.patch.object(cloud, 'load_token', return_value='hf_test'), \
+             mock.patch.object(cloud, 'cloud_clients', return_value=[remote]), \
+             mock.patch('agentharness.__main__._local_client', return_value=local), \
+             redirect_stdout(io.StringIO()) as output:
+            status = cmd_doctor(args)
+        self.assertEqual(status, 0)
+        self.assertIn('available', output.getvalue())
 
 
 if __name__ == "__main__":

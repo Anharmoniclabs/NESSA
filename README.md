@@ -2,6 +2,11 @@
 
 Local-first autonomous coding agent work.
 
+Run `nessa` for terminal chat with streaming replies, project Graph RAG and creative
+production tools. `/apps`, `/skills`, `/graph`, `/status` and `/help` show available
+capabilities. See [terminal, graph and creative setup](docs/TERMINAL_GRAPH_CREATIVE.md)
+for Blender/Craft integration, validation and current limits.
+
 Desktop chat can call live `weather`, `web_search`, and `web_fetch` tools, and
 read/OCR documents with `local_read` or extract regex fields/tables with
 `local_extract`. Local read roots are Projects, Documents, Downloads, Desktop,

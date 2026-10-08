@@ -80,13 +80,14 @@ class Reply:
     reasoning: str | None = None
     prompt_tokens: int = 0
     finish_reason: str | None = None
+    inference: dict = field(default_factory=dict)
 
 
 class ChatClient:
     def __init__(self, base_url: str, model: str, *, temperature: float = 0.0,
                  max_tokens: int = 4096, timeout: float = 900, retries: int = 3,
                  allow_remote: bool = False, api_key: str = "local", reasoning_effort: str | None = None,
-                 on_delta=None):
+                 on_delta=None, stream: bool = False):
         host = urllib.parse.urlparse(base_url).hostname
         if host not in LOCAL_HOSTS and not allow_remote:
             raise ValueError(f"Refusing non-local model server {host!r}; pass allow_remote=True to override.")
@@ -100,6 +101,7 @@ class ChatClient:
         self.retries = retries
         self.api_key = api_key
         self.reasoning_effort = reasoning_effort
+        self.stream = stream
         self.on_delta = on_delta
         # Local traffic must not go through an HTTP proxy configured for the internet.
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -138,13 +140,16 @@ class ChatClient:
             data=json.dumps(body).encode(), headers={'Content-Type': 'application/json',
             'Authorization': f'Bearer {self.api_key}'})
         content, reasoning, calls, usage, finish = [], [], {}, {}, None
-        visible = VisibleText(self.on_delta)
+        visible = VisibleText(self.on_delta or (lambda _: None))
+        first_generated = first_visible = last_generated = None
+        served_model = None
         size = 0
         started = time.monotonic()
         try:
             with self._opener.open(req, timeout=self.timeout) as response:
                 for line in response:
-                    if time.monotonic() - started > self.timeout:
+                    elapsed = time.monotonic() - started
+                    if elapsed > self.timeout:
                         raise ModelError('Local model response exceeded its time limit')
                     size += len(line)
                     if size > 4_000_000:
@@ -157,15 +162,22 @@ class ChatClient:
                     data = json.loads(payload)
                     if data.get('error'):
                         raise ModelError(str(data['error']))
+                    served_model = data.get('model') or served_model
                     usage = data.get('usage') or usage
                     for choice in data.get('choices') or []:
                         if choice.get('index', 0) != 0:
                             continue
                         finish = choice.get('finish_reason') or finish
                         delta = choice.get('delta') or {}
+                        if any(delta.get(k) for k in ('content', 'reasoning_content', 'reasoning', 'tool_calls')):
+                            if first_generated is None:
+                                first_generated = elapsed
+                            last_generated = elapsed
                         if delta.get('content'):
                             content.append(delta['content'])
                             visible.feed(delta['content'])
+                            if visible.text and first_visible is None:
+                                first_visible = elapsed
                         if delta.get('reasoning_content') or delta.get('reasoning'):
                             reasoning.append(delta.get('reasoning_content') or delta['reasoning'])
                         for call in delta.get('tool_calls') or []:
@@ -197,7 +209,11 @@ class ChatClient:
                 raise PartialResponse('Model stream ended before completion', visible.text)
             raise ModelError('Model stream ended before completion')
         return {'choices': [{'finish_reason': finish, 'message': {'content': ''.join(content),
-            'reasoning_content': ''.join(reasoning), 'tool_calls': [calls[k] for k in sorted(calls)]}}], 'usage': usage}
+            'reasoning_content': ''.join(reasoning), 'tool_calls': [calls[k] for k in sorted(calls)]}}], 'usage': usage, 'model': served_model,
+            '_timing': {'request_seconds': time.monotonic() - started,
+                        'ttft_seconds': first_generated, 'first_visible_seconds': first_visible,
+                        'generation_span_seconds': (last_generated - first_generated)
+                            if first_generated is not None else None}}
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None,
              tool_names: set[str] | None = None) -> Reply:
@@ -210,7 +226,24 @@ class ChatClient:
         if tools:
             body["tools"] = tools
             body["tool_choice"] = "auto"
-        data = self._stream_request(body) if self.on_delta is not None else self._request("/chat/completions", body)
+        if self.stream or self.on_delta is not None:
+            data = self._stream_request(body)
+        else:
+            started = time.monotonic()
+            data = self._request("/chat/completions", body)
+            data['_timing'] = {'request_seconds': time.monotonic() - started,
+                               'ttft_seconds': None, 'first_visible_seconds': None,
+                               'generation_span_seconds': None}
+        usage = data.get('usage') or {}
+        inference = dict(data['_timing'], requested_model=self.model,
+                         served_model=data.get('model'), prompt_tokens=usage.get('prompt_tokens'),
+                         completion_tokens=usage.get('completion_tokens'),
+                         cached_tokens=(usage.get('prompt_tokens_details') or {}).get('cached_tokens'),
+                         reasoning_tokens=(usage.get('completion_tokens_details') or {}).get('reasoning_tokens'))
+        span, count = inference['generation_span_seconds'], inference['completion_tokens']
+        # Network-observed estimate: SSE events can contain multiple tokens and buffered reasoning.
+        inference['decode_tokens_per_second_estimate'] = ((count - 1) / span
+            if span and isinstance(count, (int, float)) and count > 1 else None)
         choices = data.get("choices") or []
         if not choices:
             raise ModelError(f"No choices in response: {str(data)[:500]}")
@@ -262,7 +295,7 @@ class ChatClient:
         return Reply(content=content, tool_calls=calls, native=native, raw_tool_calls=normalized,
                      reasoning=reasoning,
                      prompt_tokens=int((data.get("usage") or {}).get("prompt_tokens") or 0),
-                     finish_reason=choices[0].get("finish_reason"))
+                     finish_reason=choices[0].get("finish_reason"), inference=inference)
 
 
 _TAGGED = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.S)

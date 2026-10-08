@@ -6,6 +6,12 @@ This repository builds a local autonomous coding-agent harness. Keep one parent 
 Skills are focused micro-harness recipes inside that loop. Subagents (the `agent` tool) are
 one level deep only; do not introduce other nested autonomous agents.
 
+## Inference engineering context
+
+For inference performance, prompt budgets, provider routing, evaluation or harness
+specifications, start with `engineering/inference/README.md` and its scoped `AGENTS.md`.
+Keep measured findings, proposed changes and validation evidence distinct there.
+
 ## Development rules
 
 - Preserve the private-workspace -> patch workflow as the default.

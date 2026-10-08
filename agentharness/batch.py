@@ -85,7 +85,10 @@ def solve_one(client, comp: Path, record: dict, runs: Path, config: AgentConfig)
 
 def run_batch(client, comp: Path, out: Path, runs: Path, *, workers: int = 4,
               config: AgentConfig | None = None, limit: int | None = None,
-              id_key: str = "instance_id", patch_key: str = "model_patch") -> Path:
+              id_key: str = "instance_id", patch_key: str = "model_patch", client_factory=None) -> Path:
+    # A fallback client owns routing, cooldown and recorder state for one agent.
+    # Legacy callers without a factory run serially rather than sharing that state.
+    workers = max(1, workers) if client_factory is not None else 1
     comp, out, runs = Path(comp), Path(out), Path(runs)
     config = replace(config or AgentConfig(), require_approval=False)
     rows = [json.loads(l) for l in (comp / "tasks.jsonl").read_text().splitlines() if l.strip()]
@@ -102,8 +105,11 @@ def run_batch(client, comp: Path, out: Path, runs: Path, *, workers: int = 4,
     runs.mkdir(parents=True, exist_ok=True)
     out.parent.mkdir(parents=True, exist_ok=True)
     lock, started = threading.Lock(), time.monotonic()
+    def solve(record):
+        return solve_one(client_factory() if client_factory else client, comp, record, runs, config)
+
     with out.open("a") as f, ThreadPoolExecutor(max(1, workers)) as pool:
-        futures = {pool.submit(solve_one, client, comp, r, runs, config): r for r in todo}
+        futures = {pool.submit(solve, r): r for r in todo}
         for fut in as_completed(futures):
             tid = str(pick(futures[fut], ID_KEYS, "id"))
             try:

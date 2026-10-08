@@ -12,6 +12,8 @@ Transports: stdio (newline-delimited JSON-RPC) and streamable HTTP (JSON or SSE 
 from __future__ import annotations
 
 import atexit
+import base64
+import uuid
 import itertools
 import json
 import os
@@ -181,6 +183,7 @@ class HttpTransport(_Transport):
 class McpConnection:
     def __init__(self, server: McpServer, cwd: Path, log_dir: Path):
         self.server = server
+        self.asset_dir = Path(log_dir) / "assets"
         self.transport = (StdioTransport(server, cwd, log_dir) if server.transport == "stdio"
                           else HttpTransport(server))
         try:
@@ -219,7 +222,20 @@ class McpConnection:
             if kind == "text":
                 parts.append(item.get("text", ""))
             elif kind in ("image", "audio"):
-                parts.append(f"[{kind} {item.get('mimeType', '')} {len(item.get('data', ''))} base64 chars omitted]")
+                mime, encoded = item.get('mimeType', ''), item.get('data', '')
+                extensions = {'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp',
+                              'audio/wav': '.wav', 'audio/mpeg': '.mp3'}
+                if mime in extensions and isinstance(encoded, str) and len(encoded) <= 22_000_000:
+                    try:
+                        raw = base64.b64decode(encoded, validate=True)
+                        self.asset_dir.mkdir(parents=True, exist_ok=True)
+                        path = self.asset_dir / (uuid.uuid4().hex + extensions[mime])
+                        path.write_bytes(raw)
+                        parts.append(f'[{kind} artifact saved: {path}; visual/audio review not performed]')
+                    except (ValueError, OSError):
+                        parts.append(f'[{kind} artifact could not be saved]')
+                else:
+                    parts.append(f'[{kind} {mime}: unsupported or oversized artifact omitted]')
             elif kind == "resource":
                 resource = item.get("resource", {})
                 parts.append(resource.get("text") or f"[resource {resource.get('uri', '')}]")

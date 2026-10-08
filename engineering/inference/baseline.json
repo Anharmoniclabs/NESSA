@@ -1,0 +1,93 @@
+{
+  "summary": [
+    {
+      "model": "zai-org/GLM-5.3",
+      "arm": "raw",
+      "attempts": 3,
+      "cloud_passes": 3,
+      "cloud_answered": 3,
+      "fallback_attempts": 0,
+      "mean_seconds": 7.15,
+      "cloud_api_calls": 3,
+      "prompt_tokens": 616,
+      "completion_tokens": 2246
+    },
+    {
+      "model": "zai-org/GLM-5.3",
+      "arm": "nessa",
+      "attempts": 3,
+      "cloud_passes": 3,
+      "cloud_answered": 3,
+      "fallback_attempts": 0,
+      "mean_seconds": 22.12,
+      "cloud_api_calls": 23,
+      "prompt_tokens": 72450,
+      "completion_tokens": 4967
+    },
+    {
+      "model": "deepseek-ai/DeepSeek-V4-Pro-0813",
+      "arm": "raw",
+      "attempts": 3,
+      "cloud_passes": 2,
+      "cloud_answered": 3,
+      "fallback_attempts": 0,
+      "mean_seconds": 29.88,
+      "cloud_api_calls": 3,
+      "prompt_tokens": 629,
+      "completion_tokens": 7323
+    },
+    {
+      "model": "deepseek-ai/DeepSeek-V4-Pro-0813",
+      "arm": "nessa",
+      "attempts": 3,
+      "cloud_passes": 3,
+      "cloud_answered": 3,
+      "fallback_attempts": 0,
+      "mean_seconds": 35.69,
+      "cloud_api_calls": 30,
+      "prompt_tokens": 98077,
+      "completion_tokens": 8377
+    },
+    {
+      "model": "moonshotai/Kimi-K3",
+      "arm": "raw",
+      "attempts": 3,
+      "cloud_passes": 0,
+      "cloud_answered": 0,
+      "fallback_attempts": 3,
+      "mean_seconds": 20.19,
+      "cloud_api_calls": 3,
+      "prompt_tokens": 0,
+      "completion_tokens": 0
+    },
+    {
+      "model": "moonshotai/Kimi-K3",
+      "arm": "nessa",
+      "attempts": 3,
+      "cloud_passes": 0,
+      "cloud_answered": 0,
+      "fallback_attempts": 3,
+      "mean_seconds": 20.33,
+      "cloud_api_calls": 3,
+      "prompt_tokens": 0,
+      "completion_tokens": 0
+    }
+  ],
+  "evidence": {
+    "checks": 44,
+    "tool": 49,
+    "plan": 6,
+    "approval": 6,
+    "checkpoint": 10
+  },
+  "source_snapshots_unchanged": true,
+  "total_attempts": 18,
+  "notes": [
+    "Single-repeat synthetic pilot, not a general coding score or causal ablation.",
+    "Nessa has multiple calls; raw has one response with a 4096-output-token limit.",
+    "DeepSeek raw invoice returned empty content at 4096 completion tokens.",
+    "Kimi requests returned HTTP 429; local fallback attempts timed out at the pilot-specific 20-second limit.",
+    "Shell, persistent lessons, MCP, review, subagents, enterprise mode and desktop UI were not evaluated.",
+    "Token counts are provider reported; no billed cost was measured."
+  ]
+}

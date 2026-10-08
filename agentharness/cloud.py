@@ -81,7 +81,7 @@ def cloud_clients(token: str, models=DEFAULT_MODELS, *, max_tokens: int = 4096,
                   temperature: float = 0.0, timeout: float = 180) -> list[ChatClient]:
     # retries=1: a failing provider should hand over to the next model immediately.
     return [ChatClient(HF_ROUTER, model, max_tokens=max_tokens, temperature=temperature,
-                       timeout=timeout, retries=1, allow_remote=True, api_key=token)
+                       timeout=timeout, retries=1, allow_remote=True, api_key=token, stream=True)
             for model in models]
 
 
@@ -115,19 +115,25 @@ class FallbackClient:
 
     def chat(self, messages, tools=None, tool_names=None):
         errors = []
+        attempts = []
         candidates = self.available() or self.clients[-1:]
         for client in candidates:
+            started = time.monotonic()
             try:
                 reply = client.chat(messages, tools, tool_names)
             except (ContextOverflow, PartialResponse, KeyboardInterrupt):
                 raise  # the controller compacts or saves visible text; another model would repeat it
             except ModelError as exc:
+                attempts.append(dict(model=client.model, status='error',
+                                     seconds=time.monotonic()-started, error_type=type(exc).__name__))
                 text = str(exc)
                 fatal = any(word in text.lower() for word in FATAL)
                 self.skip_until[self.clients.index(client)] = float("inf") if fatal else self.clock() + COOLDOWN
                 errors.append(f"{client.model}: {text[:200]}")
                 self.failures.append(errors[-1])
                 continue
+            attempts.append(dict(model=client.model, status='ok', seconds=time.monotonic()-started))
+            reply.inference['attempts'] = attempts
             if self.recorder is not None and getattr(client, "base_url", "") == HF_ROUTER:
                 try:
                     self.recorder.turn(client.model, messages, tools, reply)

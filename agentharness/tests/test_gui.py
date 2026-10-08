@@ -19,12 +19,18 @@ class GuiTests(unittest.TestCase):
             if type(exc).__name__ == 'TclError':
                 self.skipTest(str(exc))
             raise
-        self.addCleanup(self.root.destroy)
+        self.addCleanup(self.destroy_root)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.app = App(Path(self.temp.name) / 'sessions', 'http://127.0.0.1:11435/v1', 'test')
         self.window = Window(self.root, self.app)
         self.root.update()
+
+    def destroy_root(self):
+        # Each test owns its Tk interpreter; cancel timers before creating the next one.
+        for callback in self.root.tk.call('after', 'info'):
+            self.root.after_cancel(callback)
+        self.root.destroy()
 
     def test_launch_and_new_chat_send_without_picker(self):
         with patch('agentharness.gui.filedialog.askdirectory') as picker, patch.object(self.app, 'send') as send:
@@ -73,6 +79,25 @@ class GuiTests(unittest.TestCase):
             self.window.show_details(1)
             self.assertEqual(self.window.tabs.index('current'), 1)
             send.assert_not_called()
+
+    def test_narrow_window_keeps_composer_and_permission_actions_visible(self):
+        self.root.geometry('820x640')
+        key = self.app.create()['id']
+        self.window.current = key
+        self.app.chats[key].data.update(
+            busy=True, messages=[dict(role='user', content='Update the project')],
+            plan=dict(goal='Allow replace_in_file?', steps=['A long argument preview ' * 8] * 8))
+        self.window.tick()
+        self.root.update()
+        picker, stop, send = self.window.model_picker, self.window.stop_button, self.window.send_button
+        self.assertLessEqual(picker.winfo_rootx()+picker.winfo_width(),stop.winfo_rootx())
+        self.assertLessEqual(stop.winfo_rootx()+stop.winfo_width(),send.winfo_rootx())
+        self.assertLessEqual(send.winfo_rootx()+send.winfo_width(),self.root.winfo_rootx()+self.root.winfo_width())
+        for button in (self.window.approve_button,self.window.allow_all_button):
+            self.assertTrue(button.winfo_ismapped())
+            self.assertLessEqual(button.winfo_rooty()+button.winfo_height(),
+                                 self.window.approval_card.winfo_rooty()+self.window.approval_card.winfo_height())
+        self.app.chats[key].data['busy'] = False
 
 
 if __name__ == '__main__':

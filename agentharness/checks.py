@@ -50,8 +50,8 @@ def run_command(command: str, cwd: Path, timeout: float = 300, output_limit: int
         timed_out = False
         try:
             proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
+        except (subprocess.TimeoutExpired, KeyboardInterrupt) as exc:
+            timed_out = isinstance(exc, subprocess.TimeoutExpired)
             if os.name == "posix":
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
@@ -60,6 +60,8 @@ def run_command(command: str, cwd: Path, timeout: float = 300, output_limit: int
             else:
                 proc.kill()
             proc.wait()
+            if isinstance(exc, KeyboardInterrupt):
+                raise
         size = buf.seek(0, 2)
         buf.seek(max(0, size - output_limit))
         tail = buf.read().decode("utf-8", "replace")

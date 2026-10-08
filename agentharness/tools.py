@@ -92,8 +92,50 @@ def _extract_table(ctx, args) -> str:
 
 def build_tools(allow_shell: bool = True, allow_extract: bool = True) -> dict[str, Tool]:
     from .studio import command as studio_command
+    from . import creative, production, image_cloud, media_cloud, studio_dataset, triposr
 
     tools = [
+        Tool('mesh_finish', 'Finish a TripoSR GLB as a textured static display character: clean normals, smooth display surface, UV unwrap, bake 2K source artwork on the visible front, retain inferred rear colors, pack textures in .blend, export textured GLB and front/three-quarter/back previews. Source PNG/JPEG and mesh must be in the project. Fresh output_dir only. Poll mesh_status. Does not rig; geometric/hidden-surface fidelity needs visual review.',
+             {'mesh':S,'image':S,'output_dir':S},('mesh','image','output_dir'),'dev',handler=triposr.finish,cacheable=False),
+        Tool('mesh_status', 'Inspect local TripoSR installation or poll a saved mesh job. No generation or automatic retries.',
+             {'job':S}, kind='read', handler=triposr.status, cacheable=False),
+        Tool('mesh_generate', 'Reconstruct one project PNG/JPEG subject image into an unrigged 3D GLB using local TripoSR. Returns a durable job; poll mesh_status. Use a fresh output_dir. Default CPU resolution 128. Background removal defaults true. Best with one isolated full-body character/object. Register the completed asset with production_update and import into Blender via blender_run to save .blend. Does not animate or rig.',
+             {'image':S, 'output_dir':S, 'resolution':{**I,'enum':[64,128,256]}, 'remove_background':{'type':'boolean'}},
+             ('image','output_dir'), 'dev', handler=triposr.generate, cacheable=False),
+        Tool('studio_dataset_check','Check a studio dataset manifest before LoRA training: reviewed hashes, captions, source provenance, duplicates, and separate train/validation splits. Does not train or infer aesthetic approval.',
+             {'manifest':S},kind='read',handler=studio_dataset.check,cacheable=False),
+        Tool('image_edit', 'Submit Qwen-Image-Edit-2509 with 1–3 local reference images through HF cloud. Costs inference credits. Saves a durable queued job, not a finished image. Use media_job to collect; never resubmit an existing job.',
+             {'prompt': S,'images': {'type':'array','items':S},'path': S,'seed': I},
+             ('prompt','images','path'),'dev',handler=lambda c,a:media_cloud.submit(c,a,'image_edit'),cacheable=False),
+        Tool('video_generate', 'Submit Wan2.2-I2V-A14B genuine image-to-video generation through HF cloud ONLY AFTER user approves the exact input image with /approve-image. Agent review notes do not count. Local PNG/JPEG input, fresh .mp4 output. Defaults 81 frames at 16fps, 720p. Costs credits. Returns queued job; use media_job to collect. This is I2V, not motion-reference Wan-Animate.',
+             {'prompt':S,'image':S,'path':S,'seed':I,'frames':I,'resolution':{**S,'enum':['480p','720p']}},
+             ('prompt','image','path'),'dev',handler=lambda c,a:media_cloud.submit(c,a,'video_generate'),cacheable=False),
+        Tool('media_job','Check one saved HF media job; collect and decode finished output. Never repeats generation. Call again later if queued/running. Requires cloud session.',
+             {'job':S},('job',),'dev',handler=media_cloud.collect,cacheable=False),
+        Tool('image_generate', 'Generate one PNG through Hugging Face cloud (fal.ai), using black-forest-labs/FLUX.1-dev by default. FLUX.1-schnell is also selectable for fast drafts; Qwen requires explicit selection. Requires --cloud, consumes HF inference credits, saves a generation receipt. No automatic retries or model substitution. Use a fresh project-relative .png path. Default 1664x928, seed 42. Inspect the resulting image before claiming visual quality.',
+             {'prompt': S, 'path': S, 'model': {**S, 'enum': list(image_cloud.MODELS)},
+              'width': I, 'height': I, 'seed': I}, ('prompt','path'), 'dev',
+             handler=image_cloud.generate, cacheable=False),
+        Tool('production_status', 'Inspect the persistent studio brief, assets, task dependencies, stale outputs and measured trials.',
+             {'task': S}, kind='read', handler=production.status_tool, cacheable=False),
+        Tool('production_update', 'Update production/state.json. Operations: brief (freeform object); asset (id,path,role,notes); task (id,argv,dependencies,assets,outputs,checks as argv arrays,timeout,purpose); review (path,verdict needs_work/accepted/unreviewed,notes). Register jobs in dependency order. Reviews are attributed notes, not machine verification.',
+             {'operation': S, 'data': {'type':'object'}}, ('operation','data'), 'edit', handler=production.update_tool, cacheable=False),
+        Tool('production_run', 'Execute a previously registered production task with declared inputs, output artifacts and independent check commands. Bounded to its timeout. Inspect the task argv before requesting execution; returns durable measured run evidence.',
+             {'task': S}, ('task',), 'dev', handler=production.run_tool, cacheable=False),
+        Tool('production_recover', 'Explicitly acknowledge an interrupted run after inspecting its process and artifacts. Preserve the old outcome; record why retry is safe. Requires action permissions and never retries automatically.',
+             {'run_id': S, 'note': S}, ('run_id','note'), 'dev', handler=production.recover_tool, cacheable=False),
+        Tool('production_compare', 'Record a timing trial for two task variants with the same inputs, output paths and check commands. Requires explicit passing checks, reports sample size, never promotes code or claims aesthetic improvement.',
+             {'baseline': S, 'candidate': S}, ('baseline','candidate'), 'edit', handler=production.compare_tool, cacheable=False),
+        Tool('creative_apps', 'Inspect installed creative apps and supported automation entry points.',
+             {}, kind='read', handler=lambda c,a: creative.inventory(), cacheable=False),
+        Tool('creative_tools', 'Discover one creative app MCP tool catalogue and exact schemas, five per page. Does not edit a document.',
+             {'app': S, 'query': S, 'offset': I}, ('app',), 'read', handler=creative.discover, cacheable=False),
+        Tool('creative_call', 'Call a discovered creative app tool. Stateful headless session; save native files explicitly. Requires action permissions.',
+             {'app': S, 'tool': S, 'arguments': {'type':'object'}}, ('app','tool','arguments'), 'mcp', handler=creative.call, cacheable=False),
+        Tool('blender_run', 'Run a project Blender Python script in background mode; may create scenes, animate and render. Inspect output artifacts after completion.',
+             {'script': S, 'timeout': I}, ('script',), 'dev', handler=creative.blender_run, cacheable=False),
+        Tool('media_probe', 'Read independent ffprobe metadata for an existing media file in the project.',
+             {'path': S}, ('path',), 'read', handler=creative.media_probe, cacheable=False),
         Tool('studio_control', 'Operate the real AnharmonicStudio app for requested music production. '
              'Launches it if needed. Actions: open, status, make_beat (editable two-bar drums), '
              'set_tempo, play, stop. Existing pads are preserved; beat/tempo changes support Undo. '
@@ -122,6 +164,8 @@ def build_tools(allow_shell: bool = True, allow_extract: bool = True) -> dict[st
              {}, kind='read', handler=lambda c,a: _runtime_info(c), cacheable=False),
         Tool('weather', 'Get current weather and today forecast for a city. Use for weather questions; report source, time and units.',
              {'location': S}, ('location',), 'read', handler=lambda c,a: online.weather(a['location']), cacheable=False),
+        Tool('graph_search', 'Retrieve project evidence by following file, symbol, import, call and documentation relationships. Returns cited source excerpts; verify before editing.',
+             {'query': S}, ('query',), 'read', handler=lambda c,a: _graph_search(c,a), cacheable=False),
         Tool('web_search', 'Search the public web for current information. Returns source links and snippets; fetch relevant pages to verify.',
              {'query': S, 'days': {**I, 'description':'News window in days; default 7. Empty shorter windows expand explicitly to 7 days.'}}, ('query',), 'read', handler=lambda c,a: online.web_search(a['query'], request=c.task if online.is_news_query(c.task) else None, days=a.get('days',7)), cacheable=False),
         Tool('news_search', 'Find recent topic-relevant news articles, check publication dates and fetch article evidence. Preserve the full requested topic.',
@@ -391,3 +435,8 @@ def _local_extract(ctx, args):
     result = ex.extract(paths, [ex.Field(**field) for field in args.get('fields', [])],
                         tables=args.get('tables', False))
     return json.dumps({'records':result.records, 'tables':result.tables}, ensure_ascii=False, default=str)[:12000]
+
+
+def _graph_search(ctx, args):
+    from .graph import GraphIndex
+    return GraphIndex(ctx.ws.repo).retrieve(args['query']) or '(no matching project graph evidence)'

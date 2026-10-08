@@ -307,12 +307,12 @@ class ModelPickerTests(unittest.TestCase):
         client, fast = again._clients({'max_tokens': 100, 'temperature': 0, 'reasoning_effort': None}, None, None)
         self.assertEqual((client.model, fast.model), ('qwen2.5-coder:3b', 'qwen2.5-coder:3b'))
 
-    def test_specific_cloud_model_has_no_silent_fallback(self):
+    def test_specific_cloud_model_preserves_local_fallback(self):
         app = self.app(cloud=True)
         app.set_model('cloud:moonshotai/Kimi-K3')
         client, fast = app._clients({'max_tokens': 100, 'temperature': 0, 'reasoning_effort': None}, None, None)
-        self.assertEqual([c.model for c in client.clients], ['moonshotai/Kimi-K3'])
-        self.assertEqual([c.model for c in fast.clients], ['moonshotai/Kimi-K3'])
+        self.assertEqual([c.model for c in client.clients], ['moonshotai/Kimi-K3', 'nessa-lfm-32k:latest'])
+        self.assertEqual([c.model for c in fast.clients], ['moonshotai/Kimi-K3', 'nessa-lfm:latest'])
 
     def test_failures_are_labelled_in_the_picker(self):
         app = self.app(cloud=True)

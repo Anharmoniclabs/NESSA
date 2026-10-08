@@ -218,6 +218,13 @@ OK_STATUSES = ("verified", "unverified", "completed", "no_change", "answered", "
 def cmd_chat(a) -> int:
     """Terminal conversation backed by the same single agent and private workspace."""
     project = Path(a.project).resolve()
+    home = Path.home().resolve()
+    # A general chat from home must not snapshot the user's entire home tree,
+    # which also contains the default session directory.
+    if project == home:
+        project = home / '.agentharness' / 'chat'
+        project.mkdir(parents=True, exist_ok=True)
+        print(f'General chat workspace: {project}')
     work = Path(a.work or Path.home() / '.agentharness' / 'runs' /
                 f"{project.name}-{time.time_ns()}")
     ws = _workspace(a, project, work)
@@ -228,20 +235,42 @@ def cmd_chat(a) -> int:
                         max_tokens=min(a.max_tokens, 4096), allow_remote=a.allow_remote)) if a.review_model else None
     task, resume, last = '', False, None
     subagent_client = _subagent_client(a)
-    if ws.direct:
-        print(f'NESSA chat | editing {project} in place | mode: {cfg.permission_mode or "plan approval"} '
-              f'| /quit to exit\nTranscript: {work / "evidence" / "transcript.jsonl"}')
-    else:
-        print(f'NESSA chat | private workspace: {work} | /apply writes accepted changes | /quit to exit')
+    from .terminal import TerminalUI
+    ui = TerminalUI(project, work, client, ws.direct, plain=getattr(a, 'plain', False))
+    ui.header()
+    if ui.interactive:
+        client.on_delta = ui.delta
+        if hasattr(client, 'on_switch'):
+            client.on_switch = lambda old,new,errors: ui.line(f'Model switched: {old} → {new}', '33')
     while True:
         try:
-            message = input('you> ').strip()
+            message = ui.read()
+            if message == '/paste':
+                ui.line('Paste text; enter /send on its own line to submit.')
+                lines = []
+                while True:
+                    line = input('… ')
+                    if line == '/send':
+                        break
+                    lines.append(line)
+                message = '\n'.join(lines).strip()
         except (EOFError, KeyboardInterrupt):
-            print('\nSession retained:', work)
+            ui.line(f'Session retained: {work}')
+            ui.close()
             return 0
         if message == '/quit':
+            ui.close()
             return 0
         if not message:
+            continue
+        try:
+            if ui.command(message, ws):
+                continue
+        except Exception as exc:
+            ui.line(f'Command failed: {type(exc).__name__}: {exc}', '33')
+            continue
+        if message.startswith('/') and message != '/apply':
+            ui.line('Unknown command. Use /help.')
             continue
         if message == '/apply':
             if ws.direct:
@@ -259,13 +288,14 @@ def cmd_chat(a) -> int:
             continue
         if not resume:
             task = message
+        ui.begin()
         agent = Agent(client, ws, config=cfg, checks=checks,
-                      approver=cli_approver if cfg.require_approval else None,
-                      on_event=print_event, reviewer=reviewer,
+                      approver=ui.approve if cfg.require_approval else None,
+                      on_event=ui.event, reviewer=reviewer,
                       lessons=LessonStore().relevant(str(project), message),
-                      asker=cli_asker, subagent_client=subagent_client)
+                      asker=ui.ask, subagent_client=subagent_client)
         result = last = agent.run(task, resume=resume, message=message if resume else '')
-        print(f'nessa> {result.summary}', flush=True)
+        ui.answer(result)
         if result.status not in ('answered', 'awaiting_input'):
             print(f'[{result.status}] Evidence: {result.evidence_dir}', flush=True)
         resume = True
@@ -324,8 +354,8 @@ def cmd_transcript(a) -> int:
 def cmd_batch(a) -> int:
     from .batch import run_batch
     cfg = _config(a, require_approval=False)
-    run_batch(_client(a), Path(a.comp), Path(a.out), Path(a.runs), workers=a.workers, config=cfg,
-              limit=a.limit, id_key=a.id_key, patch_key=a.patch_key)
+    run_batch(None, Path(a.comp), Path(a.out), Path(a.runs), workers=a.workers, config=cfg,
+              limit=a.limit, id_key=a.id_key, patch_key=a.patch_key, client_factory=lambda: _client(a))
     return 0
 
 
@@ -410,13 +440,18 @@ def cmd_doctor(a) -> int:
         try:
             token = cloud.load_token(a.hf_token_file)
             models = tuple(m for m in (a.cloud_models or "").split(",") if m) or cloud.DEFAULT_MODELS
+            cloud_available = False
             for client in cloud.cloud_clients(token, models, max_tokens=8):
                 try:
                     client.chat([{"role": "user", "content": "ping"}])
                     print(f"cloud {client.model}: available")
+                    cloud_available = True
                 except ModelError as exc:
                     print(f"cloud {client.model}: UNAVAILABLE ({str(exc)[:160]})")
+            if not cloud_available:
+                ok = False
         except ValueError as exc:
+            ok = False
             print(f"cloud: {exc}")
     try:
         models = _local_client(a).models()
@@ -516,6 +551,7 @@ def main(argv=None) -> int:
     chat = sub.add_parser('chat', help='terminal conversation with tools and durable follow-ups')
     chat.add_argument('project')
     chat.add_argument('--work')
+    chat.add_argument('--plain', action='store_true', help='plain terminal output without live streaming or color')
     chat.add_argument('--auto-approve', action='store_true')
     agent_args(chat)
     chat.set_defaults(fn=cmd_chat)

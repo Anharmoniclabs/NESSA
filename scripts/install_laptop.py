@@ -62,7 +62,7 @@ def launcher_text(app: Path, python: str) -> str:
     return f'''#!/usr/bin/env bash
 set -euo pipefail
 export PYTHONPATH={shlex.quote(str(app))}${{PYTHONPATH:+:$PYTHONPATH}}
-if [[ $# == 0 ]]; then set -- --help; fi
+if [[ $# == 0 ]]; then set -- chat "$PWD"; fi
 case "$1" in
   chat|run|resume|doctor|batch)
     systemctl --user start nessa-ollama.service
